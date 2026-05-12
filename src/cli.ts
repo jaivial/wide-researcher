@@ -8,6 +8,9 @@
 import { Command } from 'commander';
 import chalk from 'chalk';
 
+import { installGlobalInfra } from './installers/index.js';
+import { log } from './utils/log.js';
+
 const program = new Command();
 
 program
@@ -22,8 +25,28 @@ program
   .description('First-time setup on this machine: install Qdrant + embed model + indexer for the current project.')
   .option('--no-watch', 'Skip systemd/launchd watcher daemon install (auto-watch is ON by default)')
   .option('--qdrant-port <port>', 'Qdrant REST port (default 6333; auto-fallback to 6334 on conflict)', '6333')
-  .action(() => {
-    stubCommand('init');
+  .option('--force', 'Reinstall global infra even if already healthy')
+  .option('--only-global', 'Install Qdrant + venv + model only; skip per-project bits')
+  .action(async (opts: { force?: boolean; onlyGlobal?: boolean }) => {
+    try {
+      log.step('Phase 3 · global infra (qdrant + python venv + embed model)');
+      await installGlobalInfra({ force: opts.force });
+      log.ok('global infra ready');
+
+      if (opts.onlyGlobal) {
+        log.info('--only-global set; skipping per-project setup (Phases 4-8 land later).');
+        return;
+      }
+
+      log.warn(
+        'per-project setup (config.json, systemd unit, claude bundle, initial index) ' +
+          'is not implemented yet — that is Phases 4-8 of the roadmap. ' +
+          'Re-run when those land.',
+      );
+    } catch (e) {
+      log.error((e as Error).message);
+      process.exit(1);
+    }
   });
 
 program
