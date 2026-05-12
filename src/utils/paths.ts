@@ -26,7 +26,7 @@ export function qdrantRoot(): string {
 }
 
 export function qdrantBinary(): string {
-  return path.join(qdrantRoot(), 'qdrant');
+  return path.join(qdrantRoot(), process.platform === 'win32' ? 'qdrant.exe' : 'qdrant');
 }
 
 export function qdrantConfigPath(): string {
@@ -50,11 +50,14 @@ export function venvRoot(): string {
 }
 
 export function venvPython(): string {
-  return path.join(venvRoot(), 'bin', 'python');
+  // Windows: `<venv>/Scripts/python.exe`. POSIX: `<venv>/bin/python`.
+  const isWin = process.platform === 'win32';
+  return path.join(venvRoot(), isWin ? 'Scripts' : 'bin', isWin ? 'python.exe' : 'python');
 }
 
 export function venvPip(): string {
-  return path.join(venvRoot(), 'bin', 'pip');
+  const isWin = process.platform === 'win32';
+  return path.join(venvRoot(), isWin ? 'Scripts' : 'bin', isWin ? 'pip.exe' : 'pip');
 }
 
 export function pyPackageRoot(): string {

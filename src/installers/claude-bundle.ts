@@ -28,6 +28,7 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 
 import { log } from '../utils/log.js';
+import { renderTemplate } from '../utils/template.js';
 import {
   ensureDir,
   exists,
@@ -144,6 +145,103 @@ async function writeClaudeBundle(id: ProjectIdentity, force: boolean): Promise<v
   await copyDir(tplSkill, path.join(claudeDir, 'skills', 'wide-research'), force);
 }
 
+/* ── auto-run hook (UserPromptSubmit) ──────────────────────────────── */
+
+const HOOK_MARKER = '<!-- wide-researcher-hook -->';
+
+async function writeHookScript(id: ProjectIdentity, force: boolean): Promise<string> {
+  const hookDir = path.join(projectConfigDir(id.projectRoot), 'hooks');
+  await ensureDir(hookDir);
+  const dst = path.join(hookDir, 'wide_research_hook.py');
+  if (!force && (await exists(dst))) {
+    log.skip(`hook script already present at ${dst}`);
+    return dst;
+  }
+  const tpl = path.join(templatesRoot(), 'hooks', 'wide_research_hook.py.tpl');
+  const rendered = await renderTemplate(tpl, {
+    VENV_PYTHON: venvPython(),
+    PY_ROOT: pyPackageRoot(),
+    PROJECT_CONFIG: id.configPath,
+  });
+  await fs.writeFile(dst, rendered, 'utf8');
+  // Make executable on POSIX — harmless on Windows.
+  try {
+    await fs.chmod(dst, 0o755);
+  } catch {
+    /* ignore on Windows */
+  }
+  log.ok(`wrote ${dst}`);
+  return dst;
+}
+
+interface ClaudeSettingsHooks {
+  hooks?: {
+    UserPromptSubmit?: Array<{
+      matcher?: string;
+      hooks?: Array<{
+        type?: string;
+        command?: string;
+        timeout?: number;
+        statusMessage?: string;
+        _wr?: typeof HOOK_MARKER;
+      }>;
+    }>;
+  };
+  [k: string]: unknown;
+}
+
+async function registerClaudeHook(id: ProjectIdentity, hookScriptPath: string): Promise<void> {
+  const settingsPath = path.join(projectClaudeDir(id.projectRoot), 'settings.local.json');
+  let doc: ClaudeSettingsHooks = {};
+  if (await exists(settingsPath)) {
+    try {
+      const raw = await fs.readFile(settingsPath, 'utf8');
+      doc = JSON.parse(raw) as ClaudeSettingsHooks;
+      if (!doc || typeof doc !== 'object') doc = {};
+    } catch (e) {
+      throw new Error(
+        `Existing ${settingsPath} is not valid JSON: ${(e as Error).message}. ` +
+          `Fix by hand or delete it and re-run.`,
+      );
+    }
+  }
+  doc.hooks ??= {};
+  doc.hooks.UserPromptSubmit ??= [];
+
+  // Strip any prior wide-researcher hook entry (idempotent).
+  doc.hooks.UserPromptSubmit = doc.hooks.UserPromptSubmit
+    .map((group) => {
+      const inner = (group.hooks ?? []).filter((h) => h._wr !== HOOK_MARKER);
+      return { ...group, hooks: inner };
+    })
+    .filter((group) => (group.hooks ?? []).length > 0);
+
+  // Cross-platform invocation — `python3` on POSIX, `python` on Windows.
+  // The Python file is shebang'd but Windows ignores that; use explicit
+  // interpreter for portability.
+  const command =
+    process.platform === 'win32'
+      ? `python "${hookScriptPath}"`
+      : `python3 "${hookScriptPath}"`;
+
+  doc.hooks.UserPromptSubmit.push({
+    matcher: '*',
+    hooks: [
+      {
+        type: 'command',
+        command,
+        timeout: 30,
+        statusMessage: 'Mapping impact radius (qdrant + MiniLM-L6)…',
+        _wr: HOOK_MARKER,
+      },
+    ],
+  });
+
+  await ensureDir(path.dirname(settingsPath));
+  await fs.writeFile(settingsPath, JSON.stringify(doc, null, 2) + '\n', 'utf8');
+  log.ok(`registered UserPromptSubmit hook in ${settingsPath}`);
+}
+
 /* ── .mcp.json stanza ───────────────────────────────────────────────── */
 
 interface McpFile {
@@ -215,6 +313,8 @@ export async function installClaudeBundle(
   await writeProjectConfig(id, force);
   await writeClaudeBundle(id, force);
   await writeMcpStanza(id, force);
+  const hookScriptPath = await writeHookScript(id, force);
+  await registerClaudeHook(id, hookScriptPath);
   log.ok(`claude bundle installed for ${id.projectName}`);
   return id;
 }
@@ -236,6 +336,27 @@ export async function uninstallClaudeBundle(
       }
     } catch {
       // ignore malformed mcp.json
+    }
+  }
+
+  // Strip the wide-researcher hook entry from settings.local.json
+  const settingsPath = path.join(projectClaudeDir(id.projectRoot), 'settings.local.json');
+  if (await exists(settingsPath)) {
+    try {
+      const raw = await fs.readFile(settingsPath, 'utf8');
+      const doc = JSON.parse(raw) as ClaudeSettingsHooks;
+      if (doc?.hooks?.UserPromptSubmit) {
+        doc.hooks.UserPromptSubmit = doc.hooks.UserPromptSubmit
+          .map((group) => {
+            const inner = (group.hooks ?? []).filter((h) => h._wr !== HOOK_MARKER);
+            return { ...group, hooks: inner };
+          })
+          .filter((group) => (group.hooks ?? []).length > 0);
+        await fs.writeFile(settingsPath, JSON.stringify(doc, null, 2) + '\n', 'utf8');
+        log.ok(`removed wide-researcher hook from ${settingsPath}`);
+      }
+    } catch {
+      // ignore malformed settings.local.json
     }
   }
 

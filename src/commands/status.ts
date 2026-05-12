@@ -5,7 +5,7 @@ import path from 'node:path';
 import chalk from 'chalk';
 
 import { deriveProjectIdentity } from '../installers/claude-bundle.js';
-import { hasLaunchd, hasSystemd } from '../utils/platform.js';
+import { hasLaunchd, hasSystemd, isWindows } from '../utils/platform.js';
 import { run } from '../utils/exec.js';
 import {
   exists,
@@ -101,6 +101,9 @@ async function indexerServiceState(slug: string): Promise<string> {
     } catch {
       return 'not loaded';
     }
+  }
+  if (isWindows()) {
+    return 'manual (no Windows supervisor in v0.1)';
   }
   return 'unsupported platform';
 }

@@ -22,7 +22,10 @@ import {
   venvRoot,
 } from '../utils/paths.js';
 
-const PYTHON_CANDIDATES = ['python3.13', 'python3.12', 'python3.11', 'python3'];
+const PYTHON_CANDIDATES =
+  process.platform === 'win32'
+    ? ['python', 'python3', 'py'] // `py` is the Windows launcher
+    : ['python3.13', 'python3.12', 'python3.11', 'python3'];
 const MIN_PY = [3, 11];
 
 async function findSystemPython(): Promise<string> {

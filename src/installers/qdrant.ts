@@ -12,6 +12,7 @@ import { pipeline } from 'node:stream/promises';
 import path from 'node:path';
 import { Readable } from 'node:stream';
 import { extract as tarExtract } from 'tar';
+import AdmZip from 'adm-zip';
 
 import { detectPlatform } from '../utils/platform.js';
 import { run } from '../utils/exec.js';
@@ -28,17 +29,20 @@ import {
 /** Pin Qdrant to a known-good release. Bump deliberately. */
 export const QDRANT_VERSION = '1.18.0';
 
-function tarballUrl(): string {
-  const { qdrantTriple } = detectPlatform();
-  // e.g. https://github.com/qdrant/qdrant/releases/download/v1.18.0/qdrant-x86_64-unknown-linux-gnu.tar.gz
-  return (
-    `https://github.com/qdrant/qdrant/releases/download/v${QDRANT_VERSION}` +
-    `/qdrant-${qdrantTriple}.tar.gz`
-  );
+function archiveUrl(): { url: string; ext: 'tar.gz' | 'zip' } {
+  const { qdrantTriple, qdrantArchiveExt } = detectPlatform();
+  // e.g.
+  //   https://github.com/qdrant/qdrant/releases/download/v1.18.0/qdrant-x86_64-unknown-linux-gnu.tar.gz
+  //   https://github.com/qdrant/qdrant/releases/download/v1.18.0/qdrant-x86_64-pc-windows-msvc.zip
+  return {
+    url:
+      `https://github.com/qdrant/qdrant/releases/download/v${QDRANT_VERSION}` +
+      `/qdrant-${qdrantTriple}.${qdrantArchiveExt}`,
+    ext: qdrantArchiveExt,
+  };
 }
 
-async function downloadTarball(toFile: string): Promise<void> {
-  const url = tarballUrl();
+async function downloadArchive(toFile: string, url: string): Promise<void> {
   log.info(`downloading ${url}`);
   const res = await fetch(url, { redirect: 'follow' });
   if (!res.ok) {
@@ -51,6 +55,16 @@ async function downloadTarball(toFile: string): Promise<void> {
     Readable.fromWeb(res.body as unknown as import('node:stream/web').ReadableStream<Uint8Array>),
     createWriteStream(toFile),
   );
+}
+
+async function extractArchive(archivePath: string, ext: 'tar.gz' | 'zip', destDir: string): Promise<void> {
+  if (ext === 'tar.gz') {
+    await tarExtract({ file: archivePath, cwd: destDir });
+    return;
+  }
+  // zip — adm-zip handles Windows-style entries
+  const zip = new AdmZip(archivePath);
+  zip.extractAllTo(destDir, /* overwrite */ true);
 }
 
 async function writeConfig(): Promise<void> {
@@ -104,20 +118,22 @@ export async function installQdrant(opts: InstallQdrantOptions = {}): Promise<vo
     log.warn('qdrant binary exists but failed --version; re-downloading');
   }
 
-  const tarball = path.join(qdrantRoot(), `qdrant-${QDRANT_VERSION}.tar.gz`);
+  const { url, ext } = archiveUrl();
+  const archive = path.join(qdrantRoot(), `qdrant-${QDRANT_VERSION}.${ext}`);
   log.step(`installing qdrant ${QDRANT_VERSION}`);
-  await downloadTarball(tarball);
+  await downloadArchive(archive, url);
 
-  log.info(`extracting ${path.basename(tarball)}`);
-  await tarExtract({ file: tarball, cwd: qdrantRoot() });
+  log.info(`extracting ${path.basename(archive)}`);
+  await extractArchive(archive, ext, qdrantRoot());
 
   // Some release archives include a top-level dir; flatten by moving the
   // binary up to qdrantRoot() if necessary.
   if (!(await exists(qdrantBinary()))) {
+    const binName = process.platform === 'win32' ? 'qdrant.exe' : 'qdrant';
     const entries = await fs.readdir(qdrantRoot(), { withFileTypes: true });
     for (const e of entries) {
       if (!e.isDirectory()) continue;
-      const candidate = path.join(qdrantRoot(), e.name, 'qdrant');
+      const candidate = path.join(qdrantRoot(), e.name, binName);
       if (await exists(candidate)) {
         await fs.rename(candidate, qdrantBinary());
         break;
@@ -127,12 +143,17 @@ export async function installQdrant(opts: InstallQdrantOptions = {}): Promise<vo
 
   if (!(await exists(qdrantBinary()))) {
     throw new Error(
-      `qdrant binary not found after extraction in ${qdrantRoot()}. Tarball layout may have changed.`,
+      `qdrant binary not found after extraction in ${qdrantRoot()}. Archive layout may have changed.`,
     );
   }
 
-  await fs.chmod(qdrantBinary(), 0o755);
-  await fs.rm(tarball, { force: true });
+  // chmod is a no-op on Windows but harmless.
+  try {
+    await fs.chmod(qdrantBinary(), 0o755);
+  } catch {
+    /* ignore on Windows */
+  }
+  await fs.rm(archive, { force: true });
 
   if (!(await verifyBinary())) {
     throw new Error(`qdrant --version failed after install. See ${qdrantBinary()}.`);

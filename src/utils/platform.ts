@@ -2,7 +2,7 @@
 
 import os from 'node:os';
 
-export type SupportedOs = 'linux' | 'macos';
+export type SupportedOs = 'linux' | 'macos' | 'windows';
 export type SupportedArch = 'x86_64' | 'aarch64';
 
 export interface PlatformInfo {
@@ -10,6 +10,10 @@ export interface PlatformInfo {
   arch: SupportedArch;
   /** Qdrant release asset target triple, e.g. `x86_64-unknown-linux-gnu`. */
   qdrantTriple: string;
+  /** Qdrant release archive extension (`tar.gz` on POSIX, `zip` on Windows). */
+  qdrantArchiveExt: 'tar.gz' | 'zip';
+  /** Whether `process.platform === 'win32'`. */
+  isWindows: boolean;
 }
 
 export function detectPlatform(): PlatformInfo {
@@ -22,11 +26,9 @@ export function detectPlatform(): PlatformInfo {
   } else if (platform === 'darwin') {
     osKey = 'macos';
   } else if (platform === 'win32') {
-    throw new Error(
-      'Native Windows is not supported in v0.1. Run wide-researcher inside WSL2 instead.',
-    );
+    osKey = 'windows';
   } else {
-    throw new Error(`Unsupported platform: ${platform}. Linux + macOS only in v0.1.`);
+    throw new Error(`Unsupported platform: ${platform}. Linux / macOS / Windows only.`);
   }
 
   let archKey: SupportedArch;
@@ -43,12 +45,34 @@ export function detectPlatform(): PlatformInfo {
   //   qdrant-aarch64-unknown-linux-gnu.tar.gz
   //   qdrant-x86_64-apple-darwin.tar.gz
   //   qdrant-aarch64-apple-darwin.tar.gz
-  const triple =
-    osKey === 'linux'
-      ? `${archKey}-unknown-linux-gnu`
-      : `${archKey}-apple-darwin`;
+  //   qdrant-x86_64-pc-windows-msvc.zip       (Windows only — no aarch64)
+  let triple: string;
+  let ext: 'tar.gz' | 'zip';
+  if (osKey === 'linux') {
+    triple = `${archKey}-unknown-linux-gnu`;
+    ext = 'tar.gz';
+  } else if (osKey === 'macos') {
+    triple = `${archKey}-apple-darwin`;
+    ext = 'tar.gz';
+  } else {
+    // windows
+    if (archKey !== 'x86_64') {
+      throw new Error(
+        `Qdrant does not ship ${archKey} Windows binaries (only x86_64). ` +
+          `If you are on Windows ARM, run inside WSL2 to use the linux/aarch64 build.`,
+      );
+    }
+    triple = `${archKey}-pc-windows-msvc`;
+    ext = 'zip';
+  }
 
-  return { os: osKey, arch: archKey, qdrantTriple: triple };
+  return {
+    os: osKey,
+    arch: archKey,
+    qdrantTriple: triple,
+    qdrantArchiveExt: ext,
+    isWindows: osKey === 'windows',
+  };
 }
 
 export function hasSystemd(): boolean {
@@ -57,6 +81,10 @@ export function hasSystemd(): boolean {
 
 export function hasLaunchd(): boolean {
   return process.platform === 'darwin';
+}
+
+export function isWindows(): boolean {
+  return process.platform === 'win32';
 }
 
 export function cpuCount(): number {

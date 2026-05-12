@@ -181,12 +181,18 @@ logs        /home/u/.wide-researcher/logs/indexer-myapp_a1b2c3d4.log
 ## Requirements
 
 - **Linux** (any modern distro with `systemd --user`) or
-  **macOS** (10.15+)
+  **macOS** (10.15+) or **Windows 10/11** (x86_64)
 - **Node.js** 20+
 - **Python** 3.11+
 - **~200 MB free disk** for Qdrant + model
 
-Windows: **WSL2 only** in v0.1. Native Windows is roadmap.
+**Windows note:** v0.1 supports native Windows for everything except
+process supervision. Qdrant binary, Python venv, embed model, MCP
+server, Claude bundle, and the impact-diagram hook all install and
+run natively. The systemd / launchd auto-start daemons are not yet
+ported — Windows users run `qdrant.exe` and the indexer watcher
+manually (or wrap with `nssm.exe` / Task Scheduler). Native auto-
+start lands in v0.2.
 
 ---
 

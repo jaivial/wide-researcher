@@ -1,6 +1,6 @@
 {
   "name": "wide-researcher",
-  "version": "0.1.0-alpha.0",
+  "version": "0.1.0-alpha.1",
   "description": "Qdrant-backed semantic code-search + impact-radius diagrams, dropped into any project as a Claude Code MCP server with one command.",
   "keywords": [
     "claude",
@@ -50,6 +50,8 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.1",
     "@qdrant/js-client-rest": "^1.18.0",
+    "@types/adm-zip": "^0.5.8",
+    "adm-zip": "^0.5.17",
     "chalk": "^5.3.0",
     "commander": "^12.1.0",
     "node-fetch": "^3.3.2",
