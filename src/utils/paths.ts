@@ -63,6 +63,10 @@ export function pyPackageRoot(): string {
   return path.resolve(__dirname, '..', '..', 'python');
 }
 
+export function templatesRoot(): string {
+  return path.resolve(__dirname, '..', '..', 'templates');
+}
+
 export function logsRoot(): string {
   return path.join(globalRoot(), 'logs');
 }

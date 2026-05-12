@@ -27,10 +27,13 @@ program
   .option('--qdrant-port <port>', 'Qdrant REST port (default 6333; auto-fallback to 6334 on conflict)', '6333')
   .option('--force', 'Reinstall global infra even if already healthy')
   .option('--only-global', 'Install Qdrant + venv + model only; skip per-project bits')
-  .action(async (opts: { force?: boolean; onlyGlobal?: boolean }) => {
+  .option('--no-supervisor', 'Skip systemd/launchd registration (containers / CI)')
+  .action(async (opts: { force?: boolean; onlyGlobal?: boolean; supervisor?: boolean }) => {
     try {
-      log.step('Phase 3 · global infra (qdrant + python venv + embed model)');
-      await installGlobalInfra({ force: opts.force });
+      // commander turns `--no-supervisor` into `supervisor: false`
+      const noSupervisor = opts.supervisor === false;
+      log.step('global infra (qdrant binary + python venv + embed model + supervisor)');
+      await installGlobalInfra({ force: opts.force, noSupervisor });
       log.ok('global infra ready');
 
       if (opts.onlyGlobal) {
