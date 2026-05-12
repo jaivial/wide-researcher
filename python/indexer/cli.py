@@ -162,12 +162,24 @@ def _run_index(force: bool, verbose: bool, single_file: str | None):
         else:
             n_error += 1
         gc.collect()
-        if i and i % 500 == 0:
-            # Cycle the embedder every 500 files to release accumulated
-            # PyTorch buffers — keeps RSS bounded on huge codebases.
+        if i and i % 200 == 0:
+            # Hard memory-pressure relief every 200 files. Both backends
+            # leak through their HTTP / model layers on long runs:
+            #   • local-minilm → PyTorch intermediate buffers
+            #   • cohere       → httpx connection pool + Pydantic
+            #                    response objects (~50 MB / 1000 calls)
+            # Drop both module-level handles + force a full GC.
             import indexer.embed as _em  # type: ignore[import-not-found]
             _em._model = None
+            _em._cohere_client = None
             gc.collect()
+            # Log RSS so OOM regressions are visible.
+            try:
+                import resource
+                rss_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss // 1024
+                log.info("memory cycle at file %d — RSS peak %d MB", i, rss_mb)
+            except Exception:  # noqa: BLE001
+                pass
 
     elapsed = time.time() - t_start
     print(

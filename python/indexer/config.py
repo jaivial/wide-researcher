@@ -92,7 +92,7 @@ EMBED_MODEL: str = str(
 )
 EMBED_DIM: int = int(_cfg.get("embed_dim", 384))
 BATCH_SIZE: int = int(_cfg.get("batch_size", 16))
-MAX_FILE_BYTES: int = int(_cfg.get("max_file_bytes", 64 * 1024))
+MAX_FILE_BYTES: int = int(_cfg.get("max_file_bytes", 200 * 1024))
 
 # Cohere-only: where to read the API key from.
 SECRETS_PATH: str = str(_cfg.get("secrets_path", ""))

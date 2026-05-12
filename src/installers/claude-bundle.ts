@@ -110,7 +110,7 @@ async function writeProjectConfig(
     embed_model: model.modelId,
     embed_dim: model.embedDim,
     batch_size: 16,
-    max_file_bytes: 64 * 1024,
+    max_file_bytes: 200 * 1024,
   };
   if (model.provider === 'local-minilm') {
     cfg.model_path = miniLMPath();
