@@ -1,0 +1,9 @@
+qdrant-client>=1.18,<2
+sentence-transformers>=3.0,<4
+torch>=2.2,<3
+tree-sitter>=0.21,<0.22
+tree-sitter-languages>=1.10,<2
+huggingface_hub>=0.24,<1
+tqdm>=4.66
+watchdog>=4.0,<5
+requests>=2.31,<3
