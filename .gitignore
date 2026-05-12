@@ -1,0 +1,43 @@
+# ─── node ────────────────────────────────────────────────────────────
+node_modules/
+npm-debug.log*
+.npm/
+.yarn/
+yarn-error.log
+.pnpm-debug.log*
+
+# ─── build artifacts ─────────────────────────────────────────────────
+dist/
+build/
+*.tsbuildinfo
+
+# ─── python ──────────────────────────────────────────────────────────
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+
+# ─── secrets / env ───────────────────────────────────────────────────
+.env
+.env.local
+*.secret
+*.key
+*.pem
+
+# ─── runtime (per-user, never tracked) ───────────────────────────────
+.wide-researcher/
+
+# ─── OS / editor ─────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+.idea/
+.vscode/
+*.log
