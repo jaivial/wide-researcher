@@ -1,21 +1,25 @@
 # wide-researcher
 
-> Qdrant-backed semantic code-search + impact-radius diagrams, dropped
-> into any project as a Claude Code MCP server with a single command.
+[![npm version](https://img.shields.io/badge/npm-v0.1.0--alpha-blue.svg)](https://www.npmjs.com/package/wide-researcher)
+[![license](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+[![node](https://img.shields.io/badge/node-%3E%3D20-brightgreen.svg)](#requirements)
+[![python](https://img.shields.io/badge/python-%3E%3D3.11-yellow.svg)](#requirements)
 
-`wide-researcher` indexes your codebase into a local Qdrant vector
-database, watches the filesystem for changes, and exposes three MCP
-tools to Claude Code so the model can find files by meaning instead
-of by literal regex. When you give Claude a task description, it can
-compute the **impact radius** — every file that semantic-, keyword-,
-or side-effect-touches the task — and render it as a standalone HTML
-diagram with concentric rings and connecting edges.
-
-Everything runs locally. No telemetry. No data leaves your machine.
+> Drop a local Qdrant-backed semantic code index into any project,
+> and Claude Code gets three new MCP tools — `wr_find`, `wr_file`,
+> `wr_impact` — for finding files by **meaning** instead of by
+> literal regex.
+>
+> Plus an **impact-radius diagram** that ranks every file a task is
+> likely to touch, grouped by ring, rendered as a standalone HTML
+> page.
+>
+> One command sets it up. Indexes update automatically on save.
+> Everything runs locally. No telemetry.
 
 ---
 
-## Quickstart
+## One-line install
 
 ```bash
 # In any project's root:
@@ -24,32 +28,29 @@ npx wide-researcher init
 
 That single command:
 
-1. Installs **Qdrant** (native binary, no Docker) into
-   `~/.wide-researcher/qdrant/` if not already present.
-2. Downloads the **MiniLM-L6 embed model** into
-   `~/.wide-researcher/models/` (~80 MB, one-time).
+1. Installs **Qdrant** v1.18 (native binary, no Docker) into
+   `~/.wide-researcher/qdrant/`.
+2. Downloads **MiniLM-L6** (~80 MB) into `~/.wide-researcher/models/`.
 3. Bootstraps a Python venv at `~/.wide-researcher/venv/` with the
    indexer dependencies.
 4. Registers a `systemd --user` unit (Linux) or `launchd` plist
-   (macOS) so Qdrant + the file-watcher daemon survive reboots.
+   (macOS) so Qdrant + the file watcher survive reboots.
 5. Drops a project-scoped Claude Code agent + skill into
-   `<your-project>/.claude/` so the MCP tools auto-discover.
-6. Runs the initial full-codebase index.
+   `<project>/.claude/`.
+6. Runs the initial full-codebase index. Time scales with codebase
+   size — a 5 000-file repo takes about 5 minutes on a laptop.
 
-After that, **edit any file and the index updates automatically**.
+After `init`, **edit any file and the index updates automatically.**
 
 ### Adding a second project
 
-If you've already run `init` once, dropping wide-researcher into
-another project is a single command:
+If `init` has already run on this machine, dropping wide-researcher
+into another project is a single command that skips the global infra:
 
 ```bash
 # In the new project's root:
 npx wide-researcher add
 ```
-
-Skips the global infra (Qdrant, model, venv) — only does the
-per-project bits and kicks off the initial index.
 
 ---
 
@@ -59,32 +60,48 @@ Three MCP tools become available the moment Claude opens the project:
 
 | Tool | What it does |
 |---|---|
-| `wr_find(query, mode="hybrid")` | Semantic + keyword hit list, ranked by score. |
-| `wr_impact(description)` | Full impact-radius report — every file the task is likely to touch, grouped by ring (direct hit / close cluster / adjacent / distant), with reasoning per file. |
-| `wr_file(path)` | All chunks for a single file — useful when Claude wants the full context of a hit. |
+| `wr_find(query, mode?, lang?, role?, layer?)` | Chunk-level semantic / keyword / hybrid search. Hybrid mode = Qdrant native RRF fusion. |
+| `wr_file(path)` | All chunks for one file, ordered. Full content, not preview. |
+| `wr_impact(description, k?)` | File-grouped impact analysis. Weighted scoring, top-3 symbol names per file. **The go-to tool for "what does this change affect" reasoning.** |
+| `wr_index_status` | Collection health (green/yellow/red) + counts. |
 
-Plus a project-scoped slash command:
+Plus a project-scoped **agent** (`.claude/agents/wide-researcher.md`)
+that wraps the tools into a 4-step workflow:
 
-```
-/wide-research <task description>
-```
-
-Renders the **impact-diagram HTML** (interactive React Flow graph) for
-the task — origin prompt in the centre, file cards in concentric
-rings, connecting edges showing semantic / keyword / shared-owner /
-shared-symbol relationships.
+1. `wr_impact` for the file-level ring grouping
+2. `wr_file` for drill-down into specific files
+3. `wr_find` for concept lookups
+4. Synthesise a structured ring-grouped report
 
 ---
 
 ## CLI surface
 
 ```
-wide-researcher init                first-time setup on this machine
-wide-researcher add                 add to a new project (skip global)
-wide-researcher reindex             force a full reindex of the current project
-wide-researcher status              qdrant + indexer + last-index time
-wide-researcher search "<query>"    terminal-side smoke search
-wide-researcher uninstall           remove from this project (--all to nuke global)
+wide-researcher init                 first-time setup on this machine
+wide-researcher add                  add to a new project (skip global)
+wide-researcher reindex              incremental reindex
+wide-researcher reindex --force      full rebuild
+wide-researcher status               qdrant + indexer + last-index time
+wide-researcher status --json        machine-readable
+wide-researcher search "<query>"     terminal-side smoke search
+wide-researcher uninstall            remove from this project
+wide-researcher uninstall --all      also nuke ~/.wide-researcher/
+```
+
+### Example `status` output
+
+```
+project     myapp                    slug=myapp_a1b2c3d4
+installed   ✓  /home/u/myapp/.wide-researcher/config.json
+qdrant bin  ✓  /home/u/.wide-researcher/qdrant/qdrant
+qdrant svc  ✓  http://127.0.0.1:6333
+collection  myapp_a1b2c3d4
+  points    12891
+  vector    384-d (green)
+indexer     active
+last index  2026-05-12T14:30:28Z
+logs        /home/u/.wide-researcher/logs/indexer-myapp_a1b2c3d4.log
 ```
 
 ---
@@ -92,75 +109,144 @@ wide-researcher uninstall           remove from this project (--all to nuke glob
 ## Architecture
 
 ```
-your-project/
-├── .claude/
-│   ├── agents/wide-researcher.md     ← agent that drives the skill
-│   └── skills/wide-research/         ← skill + reference docs
-└── .wide-researcher/
-    ├── config.json                   ← collection name, watch paths, ignores
-    └── mcp-config.json               ← MCP server stanza for .mcp.json
+        ┌────────────────────────────────────────────────────┐
+        │  Claude Code (in your project, MCP-aware)          │
+        └─────────────────┬──────────────────────────────────┘
+                          │ MCP tool call: wr_find / wr_file /
+                          │ wr_impact / wr_index_status
+                          ▼
+        ┌────────────────────────────────────────────────────┐
+        │  wide-researcher-mcp (Node, stdio transport)       │
+        │  spawned by `<project>/.mcp.json`                  │
+        └───────────────┬──────────────┬─────────────────────┘
+                        │              │
+                        │ Qdrant REST  │ Python subprocess
+                        │              │ (embed worker)
+                        ▼              ▼
+            ┌─────────────────┐  ┌─────────────────┐
+            │ Qdrant 1.18     │  │ MiniLM-L6       │
+            │ 127.0.0.1:6333  │  │ sentence-       │
+            │ HNSW + payload  │  │ transformers    │
+            │ indexes         │  │ (PyTorch, 2 CPU)│
+            └────────┬────────┘  └─────────────────┘
+                     │
+                     ▼
+            ┌─────────────────┐
+            │ per-project     │
+            │ collection      │
+            │ <name>_<sha1>   │
+            └─────────────────┘
 
-~/.wide-researcher/                   ← global, shared across projects
+        ┌────────────────────────────────────────────────────┐
+        │  filesystem watcher daemon                         │
+        │  (Python · watchdog · 1.5 s debounce ·             │
+        │   subprocess-per-file flush capped at 64/tick)     │
+        └─────────────────┬──────────────────────────────────┘
+                          │
+                          │ writes to Qdrant
+                          ▼
+                  (same collection above)
+```
+
+### Per-project paths
+
+```
+<your-project>/
+├── .claude/
+│   ├── agents/wide-researcher.md
+│   └── skills/wide-research/
+│       ├── SKILL.md
+│       └── references/{mcp-tools,impact-diagram}.md
+├── .mcp.json                         ← wide-researcher MCP stanza
+└── .wide-researcher/
+    ├── config.json                   ← collection name, paths, ignores
+    └── runs/<slug>/                  ← research-context.json + diagram
+```
+
+### Global paths
+
+```
+~/.wide-researcher/
 ├── qdrant/                           ← native binary + storage
-├── models/all-MiniLM-L6-v2/          ← embed model
+│   ├── qdrant
+│   ├── config.yaml
+│   └── storage/                      ← every project's collection
+├── models/all-MiniLM-L6-v2/          ← embed model weights
 ├── venv/                             ← python deps
 └── logs/                             ← per-project indexer logs
 ```
-
-The **MCP server** is a thin Node.js wrapper that translates
-Claude's tool calls into Qdrant REST queries against the
-per-project collection (named `<project>_<sha1[0:8]>`, guaranteed
-unique). The **indexer daemon** watches the filesystem with
-`watchdog`, debounces 1.5 s, and re-embeds changed files in a
-subprocess so RAM never spikes.
 
 ---
 
 ## Requirements
 
-- **Linux** (any modern distro) or **macOS** (10.15+)
+- **Linux** (any modern distro with `systemd --user`) or
+  **macOS** (10.15+)
 - **Node.js** 20+
 - **Python** 3.11+
 - **~200 MB free disk** for Qdrant + model
 
-Windows: WSL2 only (native Windows is on the roadmap).
+Windows: **WSL2 only** in v0.1. Native Windows is roadmap.
 
 ---
 
 ## Privacy
 
 `wide-researcher` is **100% local-first**. It does not phone home,
-does not collect telemetry, and never sends your code anywhere. The
-only network calls are:
+does not collect telemetry, never sends your code anywhere.
 
-- One-time download of the Qdrant binary from
-  [github.com/qdrant/qdrant releases](https://github.com/qdrant/qdrant/releases).
-- One-time download of the MiniLM-L6 model from
-  [huggingface.co/sentence-transformers](https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2).
+The only network calls are two **one-time downloads** at install:
 
-After install, the network is never touched again.
+| When | Where | Why |
+|---|---|---|
+| First `init` | github.com/qdrant/qdrant releases | Qdrant binary (~50 MB) |
+| First `init` | huggingface.co/sentence-transformers | MiniLM-L6 weights (~80 MB) |
 
-See [docs/PRIVACY.md](docs/PRIVACY.md).
+After install, **the package never opens an outbound connection
+again.** The MCP server listens on `127.0.0.1` only.
+
+See [docs/PRIVACY.md](docs/PRIVACY.md) for the full statement.
 
 ---
 
-## Status
+## Status & roadmap
 
-🚧 **Alpha** — currently scaffolding. See
-[ROADMAP.md](#roadmap) below for the phase plan.
+**v0.1.0-alpha — functionally complete.** A fresh machine can
+`npx wide-researcher init` today and end up with a fully working
+Claude Code integration.
 
-### Roadmap
+| Phase | What | Done |
+|---|---|---|
+| 1 | Repo bootstrap | ✅ |
+| 2 | Python indexer (ts/tsx/py/go/rust/cs/json/md) | ✅ |
+| 3 | Installers (qdrant + venv + model) | ✅ |
+| 4 | Process supervision (systemd + launchd) | ✅ |
+| 5 | Filesystem watcher daemon | ✅ |
+| 6 | MCP server (wr_find / wr_file / wr_impact) | ✅ |
+| 7 | Claude bundle (agent + skill + .mcp.json) | ✅ |
+| 8 | CLI surface (init / add / reindex / status / search / uninstall) | ✅ |
+| 9 | Docs polish | ✅ |
+| 10 | CI workflow + first tagged release | pending |
 
-- [x] Phase 1 — Repo bootstrap (this commit)
-- [ ] Phase 2 — Lift the Python indexer
-- [ ] Phase 3 — Installers (Qdrant + model + venv)
-- [ ] Phase 4 — Process supervision (systemd + launchd)
-- [ ] Phase 5 — Watcher daemon
-- [ ] Phase 6 — MCP server
-- [ ] Phase 7 — Claude bundle (agent + skill templates)
-- [ ] Phase 8 — CLI surface (`init` / `add` / `reindex` / ...)
-- [ ] Phase 9 — Docs (INSTALL / ARCHITECTURE / PRIVACY / TROUBLESHOOTING)
-- [ ] Phase 10 — CI + first tagged release (v0.1.0)
+### After v0.1
+
+- Cross-encoder rerank for top-precision queries (~80 ms extra)
+- Optional Jina-v3 / bge-large embed model swap
+- Windows native (currently WSL2 only)
+- Web UI for the impact diagram history
+
+---
+
+## Documentation
+
+- **[docs/INSTALL.md](docs/INSTALL.md)** — prerequisites, install
+  steps, troubleshooting per-OS
+- **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** — full data-flow
+  diagram, why each design choice
+- **[docs/PRIVACY.md](docs/PRIVACY.md)** — exhaustive network-call
+  list, zero-telemetry claim, where your data lives
+- **[docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)** — diagnostic
+  commands, common failure modes
 
 ---
 
@@ -168,6 +254,20 @@ See [docs/PRIVACY.md](docs/PRIVACY.md).
 
 Issues + PRs welcome at
 [github.com/jaivial/wide-researcher](https://github.com/jaivial/wide-researcher).
+
+Local development:
+
+```bash
+git clone https://github.com/jaivial/wide-researcher.git
+cd wide-researcher
+npm install
+npm run build
+node bin/wide-researcher.js --help
+```
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the dev loop.
+
+---
 
 ## License
 
