@@ -10,6 +10,12 @@ export {
   uninstallIndexerSupervisor,
 } from './supervisor.js';
 export type { IndexerSupervisorOptions } from './supervisor.js';
+export {
+  installClaudeBundle,
+  uninstallClaudeBundle,
+  deriveProjectIdentity,
+} from './claude-bundle.js';
+export type { ProjectIdentity, InstallBundleOptions } from './claude-bundle.js';
 
 import { installQdrant } from './qdrant.js';
 import { installPythonVenv } from './python-venv.js';
