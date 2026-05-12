@@ -7,7 +7,8 @@ on:
     branches: [main]
 
 jobs:
-  lint-typecheck:
+  node:
+    name: node · lint + typecheck + build
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -30,7 +31,128 @@ jobs:
       - name: Build
         run: npm run build
 
-      - name: Verify bin script is executable
+      - name: Verify bin --help (commander surface)
         run: |
-          chmod +x bin/wide-researcher.js
+          chmod +x bin/wide-researcher.js bin/wide-researcher-mcp.js
           node bin/wide-researcher.js --help
+          node bin/wide-researcher.js init --help
+          node bin/wide-researcher.js status --help
+          node bin/wide-researcher.js uninstall --help
+
+      - name: MCP bin actionable error (no config)
+        run: |
+          # Confirm the MCP server's missing-config error message is
+          # the user-friendly one, not a stack trace.
+          set +e
+          out=$(node bin/wide-researcher-mcp.js 2>&1)
+          set -e
+          echo "$out"
+          echo "$out" | grep -q "missing --project-config" || (echo "expected friendly error" && exit 1)
+
+  python:
+    name: python · syntax + smoke
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ['3.11', '3.12']
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Compile every .py (syntax check)
+        run: |
+          python -m py_compile $(find python -name '*.py' -not -path '*/__pycache__/*')
+
+      - name: Indexer config + chunker_common smoke (no heavy deps)
+        run: |
+          # Probe everything we can without torch/sentence-transformers.
+          # Full pipeline tests need the venv install which is way too
+          # heavy for CI (torch is ~700 MB).
+          python -c "
+          import json, os, sys, tempfile
+          sys.path.insert(0, 'python')
+          cfg = {
+              'project_name': 'ci-smoke',
+              'project_root': '/tmp',
+              'collection_name': 'ci_smoke_test',
+          }
+          fd, p = tempfile.mkstemp(suffix='.json')
+          os.write(fd, json.dumps(cfg).encode()); os.close(fd)
+          os.environ['WIDE_RESEARCHER_PROJECT_CONFIG'] = p
+          from indexer.config import PROJECT_ROOT, QDRANT_COLLECTION, EMBED_MODEL
+          assert PROJECT_ROOT == '/tmp', PROJECT_ROOT
+          assert QDRANT_COLLECTION == 'ci_smoke_test', QDRANT_COLLECTION
+          assert 'MiniLM' in EMBED_MODEL or 'sentence' in EMBED_MODEL
+          from indexer.chunker_common import chunk_markdown, chunk_json_locale, chunk_lines_fallback
+          md = chunk_markdown('# H1\nbody1\n# H2\nbody2')
+          assert len(md) == 2, md
+          ll = chunk_lines_fallback('a\nb\nc\nd')
+          assert ll, ll
+          print('python smoke: OK')
+          "
+
+  templates:
+    name: templates · {{KEY}} substitution
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - run: npm ci
+      - run: npm run build
+
+      - name: Render every template, fail on stray {{ }}
+        run: |
+          node --input-type=module -e "
+          import { renderTemplate } from './dist/utils/template.js';
+          import { promises as fs } from 'node:fs';
+          import path from 'node:path';
+
+          // Stub every placeholder name our renderer might see.
+          const STUB = '/STUB';
+          const vars = {
+            QDRANT_BIN: STUB, QDRANT_CONFIG: STUB, QDRANT_ROOT: STUB,
+            VENV_PYTHON: STUB, PY_ROOT: STUB, LOG_DIR: STUB,
+            PROJECT_NAME: 'ci-smoke', PROJECT_SLUG: 'ci_smoke_test',
+            PROJECT_CONFIG: STUB,
+          };
+
+          async function walk(dir) {
+            const entries = await fs.readdir(dir, { withFileTypes: true });
+            const out = [];
+            for (const e of entries) {
+              const p = path.join(dir, e.name);
+              if (e.isDirectory()) out.push(...(await walk(p)));
+              else if (p.endsWith('.tpl')) out.push(p);
+            }
+            return out;
+          }
+
+          const tpls = await walk('templates');
+          let failed = 0;
+          for (const t of tpls) {
+            try {
+              const out = await renderTemplate(t, vars);
+              if (/\{\{[A-Z0-9_]+\}\}/.test(out)) {
+                console.error('STRAY placeholder in', t);
+                failed++;
+              } else {
+                console.log('rendered:', t);
+              }
+            } catch (e) {
+              console.error('FAILED', t, e.message);
+              failed++;
+            }
+          }
+          if (failed) process.exit(1);
+          console.log('template smoke: OK (' + tpls.length + ' templates)');
+          "
