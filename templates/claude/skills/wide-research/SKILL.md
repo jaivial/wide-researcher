@@ -74,12 +74,21 @@ Quote file paths verbatim — downstream agents need exact strings.
 
 ## Hard rules
 
-- **Use the MCP tools — do NOT grep the filesystem.** That defeats
-  the whole point of having a semantic index.
+- **MCP tools for code-content search ONLY — NEVER raw grep / find /
+  Grep / Glob / Bash search on `.ts` / `.tsx` / `.cs` / `.py` /
+  `.go` / `.rs` / `.java` / `.kt` source content.** The qdrant index
+  is ~30 ms warm, hybrid semantic+BM25, side-effect-aware. Raw grep
+  over a multi-GB tree is 500× slower AND misses semantic hits.
+- **Bash / Grep / Glob / find ARE allowed for: git ops, file metadata
+  (size, mtime), config inspection (package.json, tsconfig, .env),
+  log scans, systemd / process checks.** Just never on source content.
 - **Read-only.** Skill outputs are research artefacts, not edits.
-  Edits are someone else's job.
 - **`wr_impact` first, then `wr_find` for drill-downs.** Don't open
   with `wr_find` — you'll miss the file-level grouping.
+- **If a deferred-tool error appears for any `mcp__wide-researcher__*`
+  tool**, the call ToolSearch with
+  `select:mcp__wide-researcher__wr_find,mcp__wide-researcher__wr_impact,mcp__wide-researcher__wr_file`
+  to load the schemas, then retry.
 
 ## References
 

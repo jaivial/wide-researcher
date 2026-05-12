@@ -61,10 +61,11 @@ For every invocation:
 
 ## Hard rules
 
-- **Always use the MCP tools — never grep the filesystem yourself.**
-  The point of this agent is to use the semantic index. Falling back
-  to grep defeats the purpose and burns context on a tool the parent
-  already has.
+- **MCP tools for code-content search ONLY. Never raw grep / find /
+  Grep / Glob / Bash search on `.ts` / `.tsx` / `.cs` / `.py` / `.go`
+  / `.rs` / `.java` source content.** That defeats the whole point of
+  the index and burns context. Bash/grep IS allowed for git, configs,
+  logs, system probes — just never for code semantics.
 - **Do not edit any code.** This agent is read-only research. Report
   the impact radius; the user (or another agent) does the edits.
 - **Prefer `wr_impact` over `wr_find` as the entry point.** `wr_find`

@@ -136,18 +136,52 @@ def main() -> int:
     if not last_line:
         return 0
 
-    # Emit context injection.
+    # Emit context injection: short prose + structured impact JSON + binding
+    # rule that forbids raw grep on source files (the whole point of the index).
     sys.stdout.write(
         "<wide-research>\n"
         "This project auto-runs wide-research on every user prompt — the\n"
         "impact-radius JSON below was computed against the local Qdrant\n"
         "code index (MiniLM-L6 + BM25 hybrid).\n\n"
-        "Prefer the MCP tools over raw grep for code semantics:\n"
-        "  - wr_find(query, mode=\"hybrid\")\n"
-        "  - wr_impact(description)\n"
-        "  - wr_file(path)\n\n"
         f"{last_line}\n"
         "</wide-research>\n"
+        "\n"
+        "<MCP-MANDATORY-FOR-CODE-SEARCH>\n"
+        "RULE: For ANY query about CODE content (function bodies, symbol\n"
+        "locations, \"where is X\", \"what calls Y\", \"find files that do Z\",\n"
+        "impact of a change, or any semantic search over source files), your\n"
+        "FIRST tool call MUST be one of these wide-researcher MCP tools —\n"
+        "NEVER raw grep / find / Grep / Glob / Bash search:\n"
+        "\n"
+        "  • mcp__wide-researcher__wr_find(query, mode=\"hybrid\")\n"
+        "    Single-tool search: semantic + keyword + hybrid (RRF) in one\n"
+        "    round-trip. Default mode \"hybrid\". Use it unless you specifically\n"
+        "    need pure-semantic or pure-literal.\n"
+        "\n"
+        "  • mcp__wide-researcher__wr_impact(description)\n"
+        "    File-grouped impact analysis. Weighted scoring + top-3 symbols\n"
+        "    per file. Go-to tool for \"what does this change affect?\".\n"
+        "\n"
+        "  • mcp__wide-researcher__wr_file(path)\n"
+        "    Every chunk of one file, ordered. Use after wr_find / wr_impact\n"
+        "    has located the right file and you need full content.\n"
+        "\n"
+        "Bash / Grep / Glob / find are RESERVED for: git ops, file metadata\n"
+        "(size, mtime), config inspection (package.json, tsconfig, .env),\n"
+        "log scans, system probes. NEVER for searching .ts / .tsx / .cs /\n"
+        ".py / .go / .rs / .java / .kt source content.\n"
+        "\n"
+        "The local qdrant index runs at ~30 ms warm latency, hybrid\n"
+        "semantic+BM25, side-effect aggregation per file. Raw grep over\n"
+        "a multi-GB source tree is 500× slower AND misses semantic hits.\n"
+        "Use the MCP.\n"
+        "\n"
+        "If a deferred-tool error appears, call ToolSearch with\n"
+        "  query=\"select:mcp__wide-researcher__wr_find,\"\n"
+        "        \"mcp__wide-researcher__wr_impact,\"\n"
+        "        \"mcp__wide-researcher__wr_file\"\n"
+        "first, then proceed.\n"
+        "</MCP-MANDATORY-FOR-CODE-SEARCH>\n"
     )
     return 0
 
