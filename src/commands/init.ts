@@ -1,0 +1,95 @@
+// `wide-researcher init` — first-time setup on this machine.
+//
+// Steps (each idempotent):
+//   1. Install global infra (qdrant binary + venv + embed model + qdrant supervisor)
+//   2. Derive project identity → write `<project>/.wide-researcher/config.json`
+//   3. Install Claude bundle (.claude/ + .mcp.json)
+//   4. Bootstrap the Qdrant collection (HNSW + payload indexes)
+//   5. Run the initial reindex
+//   6. Register the per-project indexer watcher daemon (unless --no-watch)
+
+import {
+  deriveProjectIdentity,
+  installClaudeBundle,
+  installGlobalInfra,
+  installIndexerSupervisor,
+} from '../installers/index.js';
+import { run } from '../utils/exec.js';
+import { log } from '../utils/log.js';
+import { pyPackageRoot, venvPython } from '../utils/paths.js';
+
+export interface InitOptions {
+  cwd?: string;
+  force?: boolean;
+  noWatch?: boolean;
+  noSupervisor?: boolean;
+  /** Skip the initial reindex (useful for smoke tests). */
+  noReindex?: boolean;
+  /** Skip the global qdrant + venv + model install (used by `add`). */
+  onlyProject?: boolean;
+}
+
+export async function runInit(opts: InitOptions = {}): Promise<void> {
+  const cwd = opts.cwd ?? process.cwd();
+
+  if (!opts.onlyProject) {
+    log.step('1/6 · global infra (qdrant binary + python venv + embed model + supervisor)');
+    await installGlobalInfra({ force: opts.force, noSupervisor: opts.noSupervisor });
+  } else {
+    log.skip('1/6 · global infra (skipped — already installed)');
+  }
+
+  log.step('2/6 · project identity + config.json');
+  const id = deriveProjectIdentity(cwd);
+  log.info(`project=${id.projectName} slug=${id.slug}`);
+
+  log.step('3/6 · claude bundle (agent + skill + .mcp.json)');
+  await installClaudeBundle({ cwd, force: opts.force });
+
+  log.step('4/6 · bootstrap qdrant collection');
+  await run(
+    venvPython(),
+    ['-m', 'scripts.init_collection'],
+    {
+      cwd: pyPackageRoot(),
+      env: {
+        ...process.env,
+        WIDE_RESEARCHER_PROJECT_CONFIG: id.configPath,
+      },
+      echo: true,
+    },
+  );
+
+  if (opts.noReindex) {
+    log.skip('5/6 · initial reindex (skipped via --no-reindex)');
+  } else {
+    log.step('5/6 · initial reindex (this takes a minute or two)');
+    await run(
+      venvPython(),
+      ['-m', 'indexer', 'reindex', '--force'],
+      {
+        cwd: pyPackageRoot(),
+        env: {
+          ...process.env,
+          WIDE_RESEARCHER_PROJECT_CONFIG: id.configPath,
+        },
+        echo: true,
+      },
+    );
+  }
+
+  if (opts.noWatch || opts.noSupervisor) {
+    log.skip('6/6 · indexer watcher (skipped via --no-watch / --no-supervisor)');
+  } else {
+    log.step('6/6 · register indexer watcher daemon');
+    await installIndexerSupervisor({
+      slug: id.slug,
+      projectName: id.projectName,
+      projectConfigPath: id.configPath,
+      force: opts.force,
+    });
+  }
+
+  log.ok(`wide-researcher ready in ${id.projectName}`);
+  log.info('open Claude Code in this directory — wr_find / wr_impact / wr_file are auto-discovered.');
+}
