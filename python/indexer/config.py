@@ -123,12 +123,15 @@ def _load_cohere_key() -> str:
 EXTRA_EXCLUDE_DIR_NAMES: list[str] = list(_cfg.get("exclude_dir_names", []))
 EXTRA_EXCLUDE_FILE_PATTERNS: list[str] = list(_cfg.get("exclude_file_patterns", []))
 
-# sidecar file→hash index lives alongside the project config by default
-_default_sidecar = str(
-    Path(_cfg.get("file_index_path", "")).expanduser()
-    or Path(PROJECT_ROOT) / ".wide-researcher" / ".file_index.json"
-)
-FILE_INDEX_PATH: str = _default_sidecar
+# sidecar file→hash index lives alongside the project config by default.
+# BUG fix (v0.1.0-alpha.5): Path("") evaluates to PosixPath('.') which
+# is truthy — the old `or` chain therefore picked "." as FILE_INDEX_PATH,
+# leading to `os.replace('..tmp', '.')` and EBUSY on every upsert.
+_file_index_cfg = (_cfg.get("file_index_path") or "").strip()
+if _file_index_cfg:
+    FILE_INDEX_PATH: str = str(Path(_file_index_cfg).expanduser())
+else:
+    FILE_INDEX_PATH = str(Path(PROJECT_ROOT) / ".wide-researcher" / ".file_index.json")
 
 
 def get_conn():

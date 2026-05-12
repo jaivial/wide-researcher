@@ -101,25 +101,77 @@ def _get_cohere_client():
 
 
 def _embed_cohere(texts: list[str], input_type: str) -> list[list[float]]:
+    """Embed via Cohere v2 SDK with retry+backoff on transient failures.
+
+    Cohere production tier has rate caps (~100 req/min on default
+    production keys). Without retries a single 429 / 5xx kills the
+    whole reindex. We retry up to 5 times with exponential backoff
+    (1 s, 2 s, 4 s, 8 s, 16 s) on:
+
+      • 429 Too Many Requests
+      • 5xx server errors
+      • Network timeouts / connection resets
+      • cohere SDK's `TooManyRequestsError` / `InternalServerError`
+
+    Persistent auth (401) / bad-request (400) errors fail fast — no retry.
+    """
+    import time
+
     client = _get_cohere_client()
     # Cohere v4 caps batch at 96 texts per call; chunk if larger.
     out: list[list[float]] = []
     CHUNK = 96
+    MAX_ATTEMPTS = 5
+
     for i in range(0, len(texts), CHUNK):
         chunk = texts[i : i + CHUNK]
-        resp = client.embed(
-            model=EMBED_MODEL,
-            input_type=input_type,
-            embedding_types=["float"],
-            texts=chunk,
-        )
-        # Cohere v2 SDK returns embeddings.float as list[list[float]].
-        floats = getattr(resp.embeddings, "float", None)
-        if floats is None and isinstance(resp.embeddings, dict):
-            floats = resp.embeddings.get("float")
-        if not floats:
-            raise RuntimeError("cohere returned no float embeddings")
-        out.extend([list(v) for v in floats])
+        # Cohere also has a per-text token cap (~512). Truncate any
+        # outlier so a single huge chunk doesn't blow up the batch.
+        chunk = [t[:4096] for t in chunk]
+
+        backoff = 1.0
+        last_err: Exception | None = None
+        succeeded = False
+        for attempt in range(1, MAX_ATTEMPTS + 1):
+            try:
+                resp = client.embed(
+                    model=EMBED_MODEL,
+                    input_type=input_type,
+                    embedding_types=["float"],
+                    texts=chunk,
+                )
+                floats = getattr(resp.embeddings, "float", None)
+                if floats is None and isinstance(resp.embeddings, dict):
+                    floats = resp.embeddings.get("float")
+                if not floats:
+                    raise RuntimeError("cohere returned no float embeddings")
+                out.extend([list(v) for v in floats])
+                succeeded = True
+                break
+            except Exception as e:  # noqa: BLE001
+                msg = str(e).lower()
+                # Fast-fail on auth + bad-request errors (no point retrying).
+                if (
+                    "401" in msg
+                    or "unauthorized" in msg
+                    or "invalid api token" in msg
+                    or ("400" in msg and "rate" not in msg)
+                ):
+                    raise
+                last_err = e
+                if attempt < MAX_ATTEMPTS:
+                    log.warning(
+                        "cohere.embed attempt %d/%d failed (%s); backoff %.1fs",
+                        attempt, MAX_ATTEMPTS, type(e).__name__, backoff,
+                    )
+                    time.sleep(backoff)
+                    backoff = min(backoff * 2.0, 30.0)
+
+        if not succeeded:
+            raise RuntimeError(
+                f"cohere.embed failed after {MAX_ATTEMPTS} attempts: {last_err}"
+            ) from last_err
+
     return out
 
 
