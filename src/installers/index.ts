@@ -3,7 +3,13 @@
 export { installQdrant, QDRANT_VERSION } from './qdrant.js';
 export { installPythonVenv } from './python-venv.js';
 export { installEmbedModel, EMBED_MODEL_ID } from './embed-model.js';
-export { installQdrantSupervisor, uninstallQdrantSupervisor } from './supervisor.js';
+export {
+  installQdrantSupervisor,
+  uninstallQdrantSupervisor,
+  installIndexerSupervisor,
+  uninstallIndexerSupervisor,
+} from './supervisor.js';
+export type { IndexerSupervisorOptions } from './supervisor.js';
 
 import { installQdrant } from './qdrant.js';
 import { installPythonVenv } from './python-venv.js';

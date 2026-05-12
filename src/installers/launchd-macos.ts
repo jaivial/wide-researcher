@@ -17,10 +17,12 @@ import {
   ensureDir,
   exists,
   logsRoot,
+  pyPackageRoot,
   qdrantBinary,
   qdrantConfigPath,
   qdrantRoot,
   templatesRoot,
+  venvPython,
 } from '../utils/paths.js';
 
 const LABEL = 'com.wide-researcher.qdrant';
@@ -126,5 +128,90 @@ export async function uninstallQdrantServiceMacOS(): Promise<void> {
       // ignore
     }
     await fs.rm(plistPath(), { force: true });
+  }
+}
+
+/* ── per-project indexer (watcher daemon) ──────────────────────────── */
+
+export interface InstallIndexerServiceOptions {
+  slug: string;
+  projectName: string;
+  projectConfigPath: string;
+  force?: boolean;
+}
+
+function indexerLabel(slug: string): string {
+  return `com.wide-researcher.indexer.${slug}`;
+}
+
+function indexerPlistPath(slug: string): string {
+  return path.join(launchAgentsDir(), `${indexerLabel(slug)}.plist`);
+}
+
+export async function installIndexerServiceMacOS(
+  opts: InstallIndexerServiceOptions,
+): Promise<void> {
+  await ensureDir(launchAgentsDir());
+  await ensureDir(logsRoot());
+
+  const tplPath = path.join(templatesRoot(), 'launchd', 'indexer.plist.tpl');
+  const rendered = await renderTemplate(tplPath, {
+    PROJECT_NAME: opts.projectName,
+    PROJECT_SLUG: opts.slug,
+    PROJECT_CONFIG: opts.projectConfigPath,
+    VENV_PYTHON: venvPython(),
+    PY_ROOT: pyPackageRoot(),
+    LOG_DIR: logsRoot(),
+  });
+
+  const ppath = indexerPlistPath(opts.slug);
+  const existed = await exists(ppath);
+  let alreadyMatches = false;
+  if (!opts.force && existed) {
+    const cur = await fs.readFile(ppath, 'utf8');
+    alreadyMatches = cur === rendered;
+  }
+
+  if (alreadyMatches) {
+    log.skip(`indexer plist already present at ${ppath}`);
+  } else {
+    log.step(`writing ${ppath}`);
+    await fs.writeFile(ppath, rendered, 'utf8');
+  }
+
+  if (existed && !alreadyMatches) {
+    try {
+      await run('launchctl', ['bootout', guiDomain(), ppath]);
+    } catch {
+      // ignore
+    }
+  }
+
+  try {
+    await run('launchctl', ['bootstrap', guiDomain(), ppath]);
+  } catch (e) {
+    log.warn(
+      `launchctl bootstrap returned non-zero (already loaded?): ${(e as Error).message}`,
+    );
+  }
+
+  try {
+    await run('launchctl', ['kickstart', '-k', `${guiDomain()}/${indexerLabel(opts.slug)}`]);
+  } catch (e) {
+    log.warn(`launchctl kickstart failed: ${(e as Error).message}`);
+  }
+
+  log.ok(`indexer watcher running for project=${opts.slug}`);
+}
+
+export async function uninstallIndexerServiceMacOS(slug: string): Promise<void> {
+  const ppath = indexerPlistPath(slug);
+  if (await exists(ppath)) {
+    try {
+      await run('launchctl', ['bootout', guiDomain(), ppath]);
+    } catch {
+      // ignore
+    }
+    await fs.rm(ppath, { force: true });
   }
 }
