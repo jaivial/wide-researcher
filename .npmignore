@@ -1,0 +1,31 @@
+# Source tree — only the compiled dist/ ships
+src/
+
+# TypeScript build metadata
+*.tsbuildinfo
+tsconfig.json
+eslint.config.js
+.eslintrc*
+
+# Python caches
+__pycache__/
+*.pyc
+*.pyo
+
+# Editor / OS
+.DS_Store
+.vscode/
+.idea/
+
+# CI / repo meta (lives on GitHub, not in the npm tarball)
+.github/
+.gitignore
+.gitattributes
+
+# Docs ship via the README link — full docs stay in the repo only
+docs/
+CONTRIBUTING.md
+
+# Dev artefacts
+*.log
+.npmrc
