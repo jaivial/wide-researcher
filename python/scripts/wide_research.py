@@ -60,23 +60,9 @@ IMPACT_WEIGHT = {
 
 
 # --- embedding -------------------------------------------------------------
-
-_model = None
-
-
-def embed_query(text: str) -> list[float]:
-    global _model
-    if _model is None:
-        import torch
-        torch.set_num_threads(2)
-        try:
-            torch.set_num_interop_threads(1)
-        except RuntimeError:
-            pass
-        from sentence_transformers import SentenceTransformer
-        _model = SentenceTransformer(EMBED_MODEL, device="cpu")
-    vec = _model.encode([text], show_progress_bar=False, convert_to_numpy=True)[0]
-    return [float(x) for x in vec]
+# Delegate to the indexer.embed module so all components use the same
+# provider branch (local-minilm vs cohere).
+from indexer.embed import embed_query  # noqa: E402, F401
 
 
 # --- qdrant calls ----------------------------------------------------------

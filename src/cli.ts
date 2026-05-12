@@ -33,19 +33,32 @@ program
   .option('--no-watch', 'Skip the systemd/launchd watcher daemon (auto-watch is ON by default)')
   .option('--no-supervisor', 'Skip systemd/launchd registration entirely (containers / CI)')
   .option('--no-reindex', 'Skip the initial reindex (useful for smoke tests)')
-  .action(async (opts: { force?: boolean; watch?: boolean; supervisor?: boolean; reindex?: boolean }) => {
-    try {
-      await runInit({
-        force: opts.force,
-        // commander turns `--no-foo` into `foo: false`
-        noWatch: opts.watch === false,
-        noSupervisor: opts.supervisor === false,
-        noReindex: opts.reindex === false,
-      });
-    } catch (e) {
-      fail(e);
-    }
-  });
+  .option('--embed-provider <provider>', 'Skip interactive picker. Values: local-minilm | cohere')
+  .option('--cohere-api-key <key>', 'Non-interactive Cohere key (use with --embed-provider cohere)')
+  .action(
+    async (opts: {
+      force?: boolean;
+      watch?: boolean;
+      supervisor?: boolean;
+      reindex?: boolean;
+      embedProvider?: 'local-minilm' | 'cohere';
+      cohereApiKey?: string;
+    }) => {
+      try {
+        await runInit({
+          force: opts.force,
+          // commander turns `--no-foo` into `foo: false`
+          noWatch: opts.watch === false,
+          noSupervisor: opts.supervisor === false,
+          noReindex: opts.reindex === false,
+          embedProvider: opts.embedProvider,
+          cohereApiKey: opts.cohereApiKey,
+        });
+      } catch (e) {
+        fail(e);
+      }
+    },
+  );
 
 program
   .command('add')
@@ -54,18 +67,31 @@ program
   .option('--no-watch', 'Skip the systemd/launchd watcher daemon')
   .option('--no-supervisor', 'Skip systemd/launchd registration entirely')
   .option('--no-reindex', 'Skip the initial reindex')
-  .action(async (opts: { force?: boolean; watch?: boolean; supervisor?: boolean; reindex?: boolean }) => {
-    try {
-      await runAdd({
-        force: opts.force,
-        noWatch: opts.watch === false,
-        noSupervisor: opts.supervisor === false,
-        noReindex: opts.reindex === false,
-      });
-    } catch (e) {
-      fail(e);
-    }
-  });
+  .option('--embed-provider <provider>', 'Skip interactive picker. Values: local-minilm | cohere')
+  .option('--cohere-api-key <key>', 'Non-interactive Cohere key')
+  .action(
+    async (opts: {
+      force?: boolean;
+      watch?: boolean;
+      supervisor?: boolean;
+      reindex?: boolean;
+      embedProvider?: 'local-minilm' | 'cohere';
+      cohereApiKey?: string;
+    }) => {
+      try {
+        await runAdd({
+          force: opts.force,
+          noWatch: opts.watch === false,
+          noSupervisor: opts.supervisor === false,
+          noReindex: opts.reindex === false,
+          embedProvider: opts.embedProvider,
+          cohereApiKey: opts.cohereApiKey,
+        });
+      } catch (e) {
+        fail(e);
+      }
+    },
+  );
 
 program
   .command('reindex')

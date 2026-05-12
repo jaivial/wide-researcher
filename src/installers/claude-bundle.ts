@@ -71,35 +71,63 @@ export function deriveProjectIdentity(cwd: string = process.cwd()): ProjectIdent
 
 /* ── config.json ────────────────────────────────────────────────────── */
 
+import type { EmbedModel } from '../models/registry.js';
+import { secretsFilePath } from '../utils/secrets.js';
+
 export interface InstallBundleOptions {
   /** Project root. Defaults to cwd. */
   cwd?: string;
   /** Re-write files even if already present. */
   force?: boolean;
+  /** Resolved embed model (from the picker). */
+  model: EmbedModel;
 }
 
-async function writeProjectConfig(id: ProjectIdentity, force: boolean): Promise<void> {
+export interface UninstallBundleOptions {
+  /** Project root. Defaults to cwd. */
+  cwd?: string;
+}
+
+async function writeProjectConfig(
+  id: ProjectIdentity,
+  model: EmbedModel,
+  force: boolean,
+): Promise<void> {
   const cfgDir = projectConfigDir(id.projectRoot);
   await ensureDir(cfgDir);
 
-  const cfg = {
+  // Provider-specific config block.
+  // For local-minilm: model lives on disk at `model_path`.
+  // For cohere: model is an API; we record the model name + which
+  //   secrets.json field holds the key. Python reads the key from
+  //   that file at runtime.
+  const cfg: Record<string, unknown> = {
     project_name: id.projectName,
     project_root: id.projectRoot,
     collection_name: id.slug,
     qdrant_url: 'http://127.0.0.1:6333',
-    model_path: miniLMPath(),
-    embed_model: 'sentence-transformers/all-MiniLM-L6-v2',
-    embed_dim: 384,
+    embed_provider: model.provider,
+    embed_model: model.modelId,
+    embed_dim: model.embedDim,
     batch_size: 16,
     max_file_bytes: 64 * 1024,
   };
+  if (model.provider === 'local-minilm') {
+    cfg.model_path = miniLMPath();
+  }
+  if (model.provider === 'cohere') {
+    cfg.secrets_path = secretsFilePath();
+    cfg.cohere_api_key_field = model.apiKeySecretField;
+    // Cohere v4 supports configurable dimensions; lock to the picker default.
+    cfg.cohere_embedding_types = ['float'];
+  }
 
   if (!force && (await exists(id.configPath))) {
     log.skip(`project config already exists at ${id.configPath}`);
     return;
   }
   await fs.writeFile(id.configPath, JSON.stringify(cfg, null, 2) + '\n', 'utf8');
-  log.ok(`wrote ${id.configPath}`);
+  log.ok(`wrote ${id.configPath} (provider=${model.provider}, dim=${model.embedDim})`);
 }
 
 /* ── .claude/ tree ──────────────────────────────────────────────────── */
@@ -304,13 +332,16 @@ async function writeMcpStanza(id: ProjectIdentity, force: boolean): Promise<void
 /* ── public entry ───────────────────────────────────────────────────── */
 
 export async function installClaudeBundle(
-  opts: InstallBundleOptions = {},
+  opts: InstallBundleOptions,
 ): Promise<ProjectIdentity> {
+  if (!opts.model) {
+    throw new Error('installClaudeBundle requires the resolved EmbedModel in opts.model');
+  }
   const id = deriveProjectIdentity(opts.cwd);
   const force = !!opts.force;
 
   log.step(`project=${id.projectName} slug=${id.slug}`);
-  await writeProjectConfig(id, force);
+  await writeProjectConfig(id, opts.model, force);
   await writeClaudeBundle(id, force);
   await writeMcpStanza(id, force);
   const hookScriptPath = await writeHookScript(id, force);
@@ -320,7 +351,7 @@ export async function installClaudeBundle(
 }
 
 export async function uninstallClaudeBundle(
-  opts: InstallBundleOptions = {},
+  opts: UninstallBundleOptions = {},
 ): Promise<void> {
   const id = deriveProjectIdentity(opts.cwd);
   const mcpPath = projectMcpPath(id.projectRoot);

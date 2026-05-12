@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
-"""Long-lived embed worker for the MCP server.
+"""Long-lived embed worker — provider-aware.
 
-Reads one JSON request per stdin line, writes one JSON response per
-stdout line:
+Reads one JSON request per stdin line, writes one JSON response:
 
   {"op": "embed", "text": "..."} → {"ok": true, "vec": [float, …]}
 
-Loads the embed model once at startup. Signals readiness with the
-literal line `EMBED_WORKER_READY` on stderr — the Node-side wrapper
-blocks queued requests until it sees that marker.
+Provider branch comes from `EMBED_PROVIDER` in the project config
+(see `indexer.config`). Two backends:
 
-Uses sentence-transformers (PyTorch) for consistency with the rest of
-the codebase. fastembed was tried; its ONNX runtime leaks
-intermediate buffers and OOMs the host after ~65 files.
+  • "local-minilm": sentence-transformers PyTorch (offline)
+  • "cohere":       cohere ClientV2 (cloud, network required)
+
+Signals readiness with `EMBED_WORKER_READY` on stderr after the
+backend is loaded (model file mmap'd, or first Cohere ping done).
 """
 from __future__ import annotations
 
@@ -31,32 +31,10 @@ _PY_ROOT = os.path.dirname(_HERE)
 if _PY_ROOT not in sys.path:
     sys.path.insert(0, _PY_ROOT)
 
-# Picks up EMBED_MODEL from the project config pointed at by
-# WIDE_RESEARCHER_PROJECT_CONFIG.
-from indexer.config import EMBED_MODEL  # noqa: E402
+from indexer.embed import embed_query, get_model  # noqa: E402
 
-import torch  # noqa: E402
-
-torch.set_num_threads(2)
-try:
-    torch.set_num_interop_threads(1)
-except RuntimeError:
-    pass
-
-from sentence_transformers import SentenceTransformer  # noqa: E402
-
-MODEL = SentenceTransformer(EMBED_MODEL, device="cpu")
-
-
-def _embed_one(text: str) -> list[float]:
-    vecs = MODEL.encode([text], show_progress_bar=False, convert_to_numpy=True)
-    if vecs is None or len(vecs) == 0:
-        raise RuntimeError("empty embedding result")
-    v = vecs[0]
-    if hasattr(v, "tolist"):
-        return v.tolist()
-    return [float(x) for x in v]
-
+# Eager-init the backend so the readiness signal is meaningful.
+get_model()
 
 sys.stderr.write("EMBED_WORKER_READY\n")
 sys.stderr.flush()
@@ -73,7 +51,7 @@ for line in sys.stdin:
 
         op = req.get("op", "embed")
         if op == "embed":
-            vec = _embed_one(req["text"])
+            vec = embed_query(req["text"])
             sys.stdout.write(json.dumps({"ok": True, "vec": vec}) + "\n")
         else:
             raise ValueError(f"unknown op: {op!r}")

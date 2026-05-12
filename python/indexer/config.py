@@ -76,6 +76,15 @@ QDRANT_COLLECTION: str = str(_require("collection_name"))
 
 # ── optional ──────────────────────────────────────────────────────────────────
 QDRANT_URL: str = str(_cfg.get("qdrant_url", "http://127.0.0.1:6333"))
+
+# Provider selection (v0.1.0-alpha.3+):
+#   "local-minilm" → sentence-transformers/all-MiniLM-L6-v2 on disk (384-d)
+#   "cohere"       → Cohere embed-v4.0 cloud API (1536-d)
+# Legacy configs without `embed_provider` default to local-minilm.
+EMBED_PROVIDER: str = str(_cfg.get("embed_provider", "local-minilm"))
+
+# For local-minilm: resolves to a filesystem path under
+# ~/.wide-researcher/models/. For cohere: the model id "embed-v4.0".
 EMBED_MODEL: str = str(
     _cfg.get("model_path")
     or _cfg.get("embed_model")
@@ -84,6 +93,31 @@ EMBED_MODEL: str = str(
 EMBED_DIM: int = int(_cfg.get("embed_dim", 384))
 BATCH_SIZE: int = int(_cfg.get("batch_size", 16))
 MAX_FILE_BYTES: int = int(_cfg.get("max_file_bytes", 64 * 1024))
+
+# Cohere-only: where to read the API key from.
+SECRETS_PATH: str = str(_cfg.get("secrets_path", ""))
+COHERE_API_KEY_FIELD: str = str(_cfg.get("cohere_api_key_field", "cohere_api_key"))
+
+
+def _load_cohere_key() -> str:
+    """Read the Cohere API key from the secrets file at runtime. Never log it."""
+    if not SECRETS_PATH:
+        raise RuntimeError(
+            "embed_provider=cohere but secrets_path is empty in project config. "
+            "Re-run `wide-researcher init` to wire the key."
+        )
+    try:
+        with open(SECRETS_PATH, encoding="utf-8") as f:
+            doc = json.load(f)
+    except (OSError, json.JSONDecodeError) as e:
+        raise RuntimeError(f"failed to read secrets at {SECRETS_PATH}: {e}") from e
+    key = doc.get(COHERE_API_KEY_FIELD)
+    if not isinstance(key, str) or len(key) < 20:
+        raise RuntimeError(
+            f"Cohere API key missing or too short in {SECRETS_PATH} "
+            f"(field={COHERE_API_KEY_FIELD!r}). Re-run `wide-researcher init`."
+        )
+    return key
 
 # extra exclude lists (extend the defaults baked into walk.py)
 EXTRA_EXCLUDE_DIR_NAMES: list[str] = list(_cfg.get("exclude_dir_names", []))

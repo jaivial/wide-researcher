@@ -1,9 +1,10 @@
 // `wide-researcher init` — first-time setup on this machine.
 //
 // Steps (each idempotent):
-//   1. Install global infra (qdrant binary + venv + embed model + qdrant supervisor)
+//   0. Pick embed model (interactive — MiniLM-L6 or Cohere v4)
+//   1. Install global infra (qdrant + venv + embed model + supervisor)
 //   2. Derive project identity → write `<project>/.wide-researcher/config.json`
-//   3. Install Claude bundle (.claude/ + .mcp.json)
+//   3. Install Claude bundle (.claude/ + .mcp.json + hook)
 //   4. Bootstrap the Qdrant collection (HNSW + payload indexes)
 //   5. Run the initial reindex
 //   6. Register the per-project indexer watcher daemon (unless --no-watch)
@@ -13,7 +14,9 @@ import {
   installClaudeBundle,
   installGlobalInfra,
   installIndexerSupervisor,
+  pickEmbedModel,
 } from '../installers/index.js';
+import type { EmbedProvider } from '../models/registry.js';
 import { run } from '../utils/exec.js';
 import { log } from '../utils/log.js';
 import { pyPackageRoot, venvPython } from '../utils/paths.js';
@@ -27,14 +30,26 @@ export interface InitOptions {
   noReindex?: boolean;
   /** Skip the global qdrant + venv + model install (used by `add`). */
   onlyProject?: boolean;
+  /** Non-interactive: force provider (skip picker). */
+  embedProvider?: EmbedProvider;
+  /** Non-interactive: pre-supplied Cohere API key. */
+  cohereApiKey?: string;
 }
 
 export async function runInit(opts: InitOptions = {}): Promise<void> {
   const cwd = opts.cwd ?? process.cwd();
 
+  log.step('0/6 · embed model selection');
+  const pick = await pickEmbedModel({
+    forceProvider: opts.embedProvider,
+    apiKey: opts.cohereApiKey,
+  });
+  const model = pick.model;
+  log.info(`chosen: ${model.label} (provider=${model.provider}, dim=${model.embedDim})`);
+
   if (!opts.onlyProject) {
-    log.step('1/6 · global infra (qdrant binary + python venv + embed model + supervisor)');
-    await installGlobalInfra({ force: opts.force, noSupervisor: opts.noSupervisor });
+    log.step('1/6 · global infra (qdrant + python venv + embed model + supervisor)');
+    await installGlobalInfra({ force: opts.force, noSupervisor: opts.noSupervisor, model });
   } else {
     log.skip('1/6 · global infra (skipped — already installed)');
   }
@@ -43,8 +58,8 @@ export async function runInit(opts: InitOptions = {}): Promise<void> {
   const id = deriveProjectIdentity(cwd);
   log.info(`project=${id.projectName} slug=${id.slug}`);
 
-  log.step('3/6 · claude bundle (agent + skill + .mcp.json)');
-  await installClaudeBundle({ cwd, force: opts.force });
+  log.step('3/6 · claude bundle (agent + skill + .mcp.json + hook)');
+  await installClaudeBundle({ cwd, force: opts.force, model });
 
   log.step('4/6 · bootstrap qdrant collection');
   await run(
@@ -90,6 +105,6 @@ export async function runInit(opts: InitOptions = {}): Promise<void> {
     });
   }
 
-  log.ok(`wide-researcher ready in ${id.projectName}`);
+  log.ok(`wide-researcher ready in ${id.projectName} (embed: ${model.label})`);
   log.info('open Claude Code in this directory — wr_find / wr_impact / wr_file are auto-discovered.');
 }

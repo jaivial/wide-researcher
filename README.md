@@ -28,19 +28,36 @@ npx wide-researcher init
 
 That single command:
 
-1. Installs **Qdrant** v1.18 (native binary, no Docker) into
+1. **Interactive embed-model picker** — choose between:
+   - `MiniLM-L6` (free, local, 384-d, recommended)
+   - `Cohere Embed v4` (paid, 1536-d, top-tier quality — prompts
+     for your Cohere production API key, stores it at
+     `~/.wide-researcher/secrets.json` mode 0600)
+2. Installs **Qdrant** v1.18 (native binary, no Docker) into
    `~/.wide-researcher/qdrant/`.
-2. Downloads **MiniLM-L6** (~80 MB) into `~/.wide-researcher/models/`.
-3. Bootstraps a Python venv at `~/.wide-researcher/venv/` with the
-   indexer dependencies.
-4. Registers a `systemd --user` unit (Linux) or `launchd` plist
+3. Downloads MiniLM-L6 (~80 MB) — OR — validates your Cohere key.
+4. Bootstraps a Python venv at `~/.wide-researcher/venv/` with the
+   indexer dependencies (incl. the `cohere` SDK for the cloud path).
+5. Registers a `systemd --user` unit (Linux) or `launchd` plist
    (macOS) so Qdrant + the file watcher survive reboots.
-5. Drops a project-scoped Claude Code agent + skill into
-   `<project>/.claude/`.
-6. Runs the initial full-codebase index. Time scales with codebase
-   size — a 5 000-file repo takes about 5 minutes on a laptop.
+6. Drops a project-scoped Claude Code agent + skill into
+   `<project>/.claude/`, plus the binding hook that injects
+   `<MCP-MANDATORY-FOR-CODE-SEARCH>` on every prompt.
+7. Runs the initial full-codebase index. Time scales with codebase
+   size — a 5 000-file repo takes ~5 min on local MiniLM,
+   ~3 min on Cohere (network-bound, batched).
 
 After `init`, **edit any file and the index updates automatically.**
+
+### Non-interactive (CI / scripted installs)
+
+```bash
+# MiniLM, skip the picker
+npx wide-researcher init --embed-provider local-minilm
+
+# Cohere, key from CLI flag (will still validate against /v2/embed)
+npx wide-researcher init --embed-provider cohere --cohere-api-key $COHERE_KEY
+```
 
 ### Adding a second project
 
