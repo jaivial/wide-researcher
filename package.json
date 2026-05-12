@@ -25,7 +25,8 @@
   "type": "module",
   "main": "dist/index.js",
   "bin": {
-    "wide-researcher": "bin/wide-researcher.js"
+    "wide-researcher": "bin/wide-researcher.js",
+    "wide-researcher-mcp": "bin/wide-researcher-mcp.js"
   },
   "files": [
     "bin",
