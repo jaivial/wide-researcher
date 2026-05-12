@@ -12,18 +12,34 @@ import {
   type EmbedProvider,
 } from '../models/registry.js';
 import { log } from '../utils/log.js';
+import { deriveProjectIdentity } from './claude-bundle.js';
+import {
+  findLatestBackup,
+  getCollectionInfo,
+  snapshotCollection,
+} from '../utils/qdrant-snapshot.js';
 
 export interface PickEmbedModelOptions {
   /** Skip the interactive picker; use this provider directly. */
   forceProvider?: EmbedProvider;
   /** Skip API-key prompt; use this value (for CI / scripted installs). */
   apiKey?: string;
+  /** Project cwd — used to detect existing collection + offer backup. */
+  cwd?: string;
+  /** Skip the "reindex required, proceed?" reconfirmation prompt. */
+  noConfirmReindex?: boolean;
+  /** Skip the "restore from previous backup?" prompt. */
+  noOfferRestore?: boolean;
 }
 
 export interface PickEmbedModelResult {
   model: EmbedModel;
   /** Set when the chosen model required a key + we just stored it. */
   apiKeyStored?: boolean;
+  /** Path to a saved snapshot of the old collection (if we just snapshotted). */
+  oldCollectionBackup?: string;
+  /** Path to a previously-saved snapshot we should restore from. */
+  restoreFromBackup?: string;
 }
 
 /** Lightweight live-test that the Cohere key actually works. */
@@ -61,12 +77,15 @@ export async function pickEmbedModel(
   // Non-interactive path
   if (opts.forceProvider) {
     const m = modelById(opts.forceProvider);
+    const r: PickEmbedModelResult = { model: m };
     if (m.requiresApiKey && opts.apiKey) {
       const field = m.apiKeySecretField!;
       await setSecret(field, opts.apiKey);
-      return { model: m, apiKeyStored: true };
+      r.apiKeyStored = true;
     }
-    return { model: m };
+    // CI / scripted mode → never prompt; auto-snapshot if dim differs.
+    await augmentWithReindexFlow(r, { ...opts, noConfirmReindex: true, noOfferRestore: true });
+    return r;
   }
 
   // Interactive picker
@@ -81,7 +100,9 @@ export async function pickEmbedModel(
 
   if (!model.requiresApiKey) {
     log.ok(`embed model: ${model.label}`);
-    return { model };
+    const r: PickEmbedModelResult = { model };
+    await augmentWithReindexFlow(r, opts);
+    return r;
   }
 
   // API key required — prompt for it
@@ -112,5 +133,119 @@ export async function pickEmbedModel(
   const field = model.apiKeySecretField!;
   await setSecret(field, key);
   log.ok(`API key stored at ${secretsFilePath()}`);
-  return { model, apiKeyStored: true };
+  const cohereResult: PickEmbedModelResult = { model, apiKeyStored: true };
+  await augmentWithReindexFlow(cohereResult, opts);
+  return cohereResult;
+}
+
+/* ── reindex-confirmation + backup/restore flow ──────────────────────── */
+
+/**
+ * After a model is chosen, check if an existing Qdrant collection
+ * uses a DIFFERENT vector dimensionality. If so:
+ *
+ *   1. Tell the user a full reindex is required (cost / time hint).
+ *   2. Reconfirm via [y/N].
+ *   3. Snapshot the existing collection into
+ *      ~/.wide-researcher/backups/<slug>__<old-provider>__<ts>.snapshot
+ *   4. Detect any previously-saved backup matching the NEW provider
+ *      and offer to restore it (skip reindex).
+ *
+ * Mutates `result` with `oldCollectionBackup` / `restoreFromBackup`
+ * so the downstream installer can act on them.
+ */
+async function augmentWithReindexFlow(
+  result: PickEmbedModelResult,
+  opts: PickEmbedModelOptions,
+): Promise<void> {
+  const id = deriveProjectIdentity(opts.cwd);
+  const info = await getCollectionInfo(id.slug);
+
+  if (!info.exists) {
+    // Fresh install — no reindex worry, no backup to make.
+    return;
+  }
+
+  const newDim = result.model.embedDim;
+  const oldDim = info.vectorSize;
+  const dimMismatch = oldDim !== undefined && oldDim !== newDim;
+
+  if (!dimMismatch) {
+    log.skip(
+      `existing collection ${id.slug} already at dim=${newDim} — no reindex needed.`,
+    );
+    return;
+  }
+
+  // Infer old provider from dim (best-effort)
+  const oldProvider: EmbedProvider =
+    oldDim === 1536 ? 'cohere' : oldDim === 384 ? 'local-minilm' : 'unknown' as EmbedProvider;
+
+  // (1) Look for an existing backup of the NEW provider — saves a reindex
+  if (!opts.noOfferRestore) {
+    const existing = await findLatestBackup(id.slug, result.model.provider);
+    if (existing) {
+      log.info(
+        `Found previous backup for provider=${result.model.provider}:\n` +
+          `  ${existing.filename}\n` +
+          `  Restoring this snapshot skips the full reindex.`,
+      );
+      const ans = await ask(
+        `Restore from this backup instead of reindexing? [Y/n]: `,
+        'Y',
+      );
+      if (!ans.toLowerCase().startsWith('n')) {
+        result.restoreFromBackup = existing.absPath;
+        log.ok(`will restore from ${existing.absPath}`);
+        // Even though we restore, also back up the CURRENT collection
+        // first (so the user can flip back later without reindex).
+        await maybeSnapshot(id.slug, oldProvider, result);
+        return;
+      }
+    }
+  }
+
+  // (2) No restore available (or user declined) → reindex required.
+  log.warn(
+    `\nSwitching from dim=${oldDim} (${oldProvider}) → dim=${newDim} (${result.model.provider})\n` +
+      `requires a FULL REINDEX of the qdrant collection (existing vectors\n` +
+      `become invalid). Approximate cost:\n` +
+      (result.model.provider === 'cohere'
+        ? `  • Cohere API: ~$0.10 / 1M input tokens. A 5,000-file repo runs\n` +
+          `    ~$2-5. Time: ~3-5 min (network-bound, batched at 96/req).\n`
+        : `  • Local MiniLM: $0 (CPU-only). Time: ~5 min on a 5,000-file repo.\n`),
+  );
+
+  if (!opts.noConfirmReindex) {
+    const ans = await ask(
+      `Proceed with full reindex? Old collection will be backed up first. [y/N]: `,
+      'N',
+    );
+    if (!ans.toLowerCase().startsWith('y')) {
+      throw new Error(
+        'Reindex declined by user. Existing collection left untouched. ' +
+          'Re-run with the previously-chosen model to abort cleanly, or pass ' +
+          '`--no-confirm-reindex` to skip this prompt next time.',
+      );
+    }
+  }
+
+  // (3) Snapshot the existing collection BEFORE we recreate it.
+  await maybeSnapshot(id.slug, oldProvider, result);
+}
+
+async function maybeSnapshot(
+  slug: string,
+  oldProvider: EmbedProvider,
+  result: PickEmbedModelResult,
+): Promise<void> {
+  try {
+    const snapshotPath = await snapshotCollection(slug, oldProvider);
+    result.oldCollectionBackup = snapshotPath;
+  } catch (e) {
+    log.warn(
+      `Snapshot failed: ${(e as Error).message}\n` +
+        `Continuing anyway — reindex will proceed without a backup.`,
+    );
+  }
 }

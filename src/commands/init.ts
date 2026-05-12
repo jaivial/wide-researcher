@@ -43,9 +43,16 @@ export async function runInit(opts: InitOptions = {}): Promise<void> {
   const pick = await pickEmbedModel({
     forceProvider: opts.embedProvider,
     apiKey: opts.cohereApiKey,
+    cwd,
   });
   const model = pick.model;
   log.info(`chosen: ${model.label} (provider=${model.provider}, dim=${model.embedDim})`);
+  if (pick.oldCollectionBackup) {
+    log.info(`old collection backed up at: ${pick.oldCollectionBackup}`);
+  }
+  if (pick.restoreFromBackup) {
+    log.info(`will restore from previous backup: ${pick.restoreFromBackup}`);
+  }
 
   if (!opts.onlyProject) {
     log.step('1/6 · global infra (qdrant + python venv + embed model + supervisor)');
@@ -61,27 +68,17 @@ export async function runInit(opts: InitOptions = {}): Promise<void> {
   log.step('3/6 · claude bundle (agent + skill + .mcp.json + hook)');
   await installClaudeBundle({ cwd, force: opts.force, model });
 
-  log.step('4/6 · bootstrap qdrant collection');
-  await run(
-    venvPython(),
-    ['-m', 'scripts.init_collection'],
-    {
-      cwd: pyPackageRoot(),
-      env: {
-        ...process.env,
-        WIDE_RESEARCHER_PROJECT_CONFIG: id.configPath,
-      },
-      echo: true,
-    },
-  );
-
-  if (opts.noReindex) {
-    log.skip('5/6 · initial reindex (skipped via --no-reindex)');
+  // Phase 4 + 5 branch on whether we're restoring a backup.
+  if (pick.restoreFromBackup) {
+    log.step('4-5/6 · restoring qdrant collection from backup (skips reindex)');
+    const { restoreFromSnapshot } = await import('../utils/qdrant-snapshot.js');
+    await restoreFromSnapshot(id.slug, pick.restoreFromBackup);
+    log.ok('collection restored from backup — no reindex needed.');
   } else {
-    log.step('5/6 · initial reindex (this takes a minute or two)');
+    log.step('4/6 · bootstrap qdrant collection');
     await run(
       venvPython(),
-      ['-m', 'indexer', 'reindex', '--force'],
+      ['-m', 'scripts.init_collection'],
       {
         cwd: pyPackageRoot(),
         env: {
@@ -91,6 +88,24 @@ export async function runInit(opts: InitOptions = {}): Promise<void> {
         echo: true,
       },
     );
+
+    if (opts.noReindex) {
+      log.skip('5/6 · initial reindex (skipped via --no-reindex)');
+    } else {
+      log.step('5/6 · initial reindex (this takes a minute or two)');
+      await run(
+        venvPython(),
+        ['-m', 'indexer', 'reindex', '--force'],
+        {
+          cwd: pyPackageRoot(),
+          env: {
+            ...process.env,
+            WIDE_RESEARCHER_PROJECT_CONFIG: id.configPath,
+          },
+          echo: true,
+        },
+      );
+    }
   }
 
   if (opts.noWatch || opts.noSupervisor) {

@@ -61,6 +61,33 @@ program
   );
 
 program
+  .command('backups')
+  .description('List Qdrant collection backups for the current project.')
+  .option('--json', 'Machine-readable JSON output')
+  .action(async (opts: { json?: boolean }) => {
+    try {
+      const { listBackups } = await import('./utils/qdrant-snapshot.js');
+      const { deriveProjectIdentity } = await import('./installers/claude-bundle.js');
+      const id = deriveProjectIdentity();
+      const list = await listBackups(id.slug);
+      if (opts.json) {
+        process.stdout.write(JSON.stringify(list, null, 2) + '\n');
+        return;
+      }
+      if (list.length === 0) {
+        process.stdout.write(`(no backups for ${id.slug})\n`);
+        return;
+      }
+      process.stdout.write(`Backups for ${id.slug}:\n`);
+      for (const b of list) {
+        process.stdout.write(`  ${b.timestamp}  provider=${b.provider}\n    ${b.absPath}\n`);
+      }
+    } catch (e) {
+      fail(e);
+    }
+  });
+
+program
   .command('add')
   .description('Add wide-researcher to a project on a machine that already has the global infra.')
   .option('--force', 'Re-run every step even if already healthy')
