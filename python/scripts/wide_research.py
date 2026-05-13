@@ -154,7 +154,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(prog="wide-research")
     ap.add_argument("--prompt", required=True)
     ap.add_argument("--plan-slug", default=None)
-    ap.add_argument("--top-k", type=int, default=20)
+    ap.add_argument("--top-k", type=int, default=100)
     ap.add_argument("--state-dir", default=None,
                     help="Override state dir. Defaults to <project>/.wide-researcher/runs/<slug>/")
     ap.add_argument("--quiet", action="store_true")
