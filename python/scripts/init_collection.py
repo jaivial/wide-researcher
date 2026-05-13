@@ -28,12 +28,12 @@ from qdrant_client.http.models import (
     RenameAlias,
 )
 
-from indexer.config import QDRANT_URL, QDRANT_COLLECTION, EMBED_DIM, EMBED_BACKEND
+from indexer.config import QDRANT_URL, QDRANT_COLLECTION, EMBED_DIM, EMBED_PROVIDER
 
 client = QdrantClient(url=QDRANT_URL)
 COLL = QDRANT_COLLECTION
 DIM = EMBED_DIM
-BACKEND = EMBED_BACKEND
+BACKEND = EMBED_PROVIDER
 STORAGE_PATH = "/root/.wide-researcher/qdrant/storage/collections"
 
 
