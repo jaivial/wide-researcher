@@ -7,7 +7,4 @@ huggingface_hub>=0.24,<1
 tqdm>=4.66
 watchdog>=4.0,<5
 requests>=2.31,<3
-# Optional — only loaded when embed_provider=cohere. Pulled into the
-# venv at install time so users can switch providers without rerunning
-# pip install.
 cohere>=5.13,<6
