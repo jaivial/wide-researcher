@@ -21,6 +21,8 @@ import time
 from abc import ABC, abstractmethod
 from typing import Iterable
 
+import requests
+
 from .config import (
     BATCH_SIZE,
     EMBED_MODEL,
@@ -379,8 +381,38 @@ def embed_batch(texts: list[str]) -> list[list[float]]:
 
 
 def embed_query(text: str) -> list[float]:
-    """Embed a single QUERY (used at search time)."""
-    return _get_provider().embed_query(text)
+    """Embed a single QUERY (used at search time). Validates dimension against Qdrant."""
+    from .config import QDRANT_URL, QDRANT_COLLECTION, EMBED_PROVIDER
+    vec = _get_provider().embed_query(text)
+
+    # Validate dimension matches the Qdrant collection to give a clear error
+    # instead of a cryptic 400 Bad Request from Qdrant.
+    try:
+        resp = requests.get(
+            f"{QDRANT_URL}/collections/{QDRANT_COLLECTION}",
+            timeout=10,
+        )
+        if resp.ok:
+            actual_dim = (
+                resp.json()
+                .get("result", {})
+                .get("config", {})
+                .get("params", {})
+                .get("vectors", {})
+                .get("size")
+            )
+            if actual_dim and actual_dim != len(vec):
+                raise ValueError(
+                    f"Dimension mismatch: embed_query returned a {len(vec)}-dim vector "
+                    f"but Qdrant collection '{QDRANT_COLLECTION}' expects {actual_dim}-dim. "
+                    f"Current EMBED_PROVIDER='{EMBED_PROVIDER}'. "
+                    f"If you switched embedding providers/models, you must recreate the "
+                    f"collection with: python -m indexer init-collection --recreate"
+                )
+    except requests.ConnectionError:
+        pass  # Qdrant not reachable — skip validation, let Qdrant fail naturally
+
+    return vec
 
 
 def teardown_provider() -> None:
