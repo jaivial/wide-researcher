@@ -78,12 +78,14 @@ QDRANT_COLLECTION: str = str(_require("collection_name"))
 QDRANT_URL: str = str(_cfg.get("qdrant_url", "http://127.0.0.1:6333"))
 
 # Provider selection (v0.1.0-alpha.3+):
-#   "local-minilm" → sentence-transformers/all-MiniLM-L6-v2 on disk (384-d)
-#   "cohere"       → Cohere embed-v4.0 cloud API (1536-d)
+#   "local-minilm"       → sentence-transformers/all-MiniLM-L6-v2 on disk (384-d)
+#   "local-bge-large"    → BAAI/bge-large-en-v1.5 on disk (1024-d)
+#   "local-gte-qwen2"    → Alibaba-NLP/gte-Qwen2-1.5B-instruct on disk (1536-d)
+#   "cohere"             → Cohere embed-v4.0 cloud API (1536-d)
 # Legacy configs without `embed_provider` default to local-minilm.
 EMBED_PROVIDER: str = str(_cfg.get("embed_provider", "local-minilm"))
 
-# For local-minilm: resolves to a filesystem path under
+# For local models: resolves to a filesystem path under
 # ~/.wide-researcher/models/. For cohere: the model id "embed-v4.0".
 EMBED_MODEL: str = str(
     _cfg.get("model_path")
@@ -118,6 +120,33 @@ def _load_cohere_key() -> str:
             f"(field={COHERE_API_KEY_FIELD!r}). Re-run `wide-researcher init`."
         )
     return key
+
+# Memory guards (v0.1.0-alpha.8+):
+#   max_rss_mb — RSS ceiling in MB. 0 = auto-detect (80% of system RAM).
+#   chunk_cap  — max chunks emitted per file. Prevents OOM on dense files.
+MAX_RSS_MB: int = int(_cfg.get("max_rss_mb", 0))
+CHUNK_CAP: int = int(_cfg.get("chunk_cap", 500))
+
+
+def _detect_max_rss_mb() -> int:
+    """Auto-detect: 80% of total physical RAM."""
+    try:
+        with open("/proc/meminfo", encoding="utf-8") as f:
+            for line in f:
+                if line.startswith("MemTotal:"):
+                    total_kb = int(line.split()[1])
+                    return int(total_kb / 1024 * 0.8)
+    except Exception:
+        pass
+    try:
+        import psutil  # type: ignore[import-not-found]
+        return int(psutil.virtual_memory().total / (1024 * 1024) * 0.8)
+    except Exception:
+        return 2048  # safe fallback: 2 GB
+
+
+if MAX_RSS_MB <= 0:
+    MAX_RSS_MB = _detect_max_rss_mb()
 
 # extra exclude lists (extend the defaults baked into walk.py)
 EXTRA_EXCLUDE_DIR_NAMES: list[str] = list(_cfg.get("exclude_dir_names", []))

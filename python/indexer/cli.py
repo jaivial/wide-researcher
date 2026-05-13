@@ -20,7 +20,8 @@ from .config import PROJECT_ROOT, PROJECT_NAME, QDRANT_COLLECTION
 from .walk import iter_files
 from .chunker import chunk_file
 from .metadata import derive_metadata
-from .embed import embed_batch, embed_query, get_model
+from .embed import embed_batch, embed_query, get_model, teardown_provider
+from .config import CHUNK_CAP, MAX_RSS_MB
 from .db import (
     compute_file_hash,
     get_indexed_files,
@@ -39,6 +40,11 @@ def _read_bytes(path: str) -> bytes | None:
     except OSError as e:
         log.warning("read failed %s: %s", path, e)
         return None
+
+
+# Maximum chunks to embed in a single API call. Keeps Cohere/httpx
+# memory bounded even for files with hundreds of chunks.
+_EMBED_MICRO_BATCH = 32
 
 
 def _process_file(
@@ -62,8 +68,13 @@ def _process_file(
     if not force and indexed_hashes is not None and indexed_hashes.get(abs_path) == file_hash:
         return ("skipped", 0)
 
+    # Free file content early for large files
+    del raw
+
     t0 = time.time()
     chunks = chunk_file(abs_path, language, text)
+    del text  # free source text
+
     if not chunks:
         try:
             upsert_file(None, repo, abs_path, file_hash, [], [], [], language)
@@ -72,9 +83,15 @@ def _process_file(
             return ("error", 0)
         return ("indexed", 0)
 
-    # Boost the EMBED INPUT (not the stored content) with filename + parent
-    # folder signal so retrieval picks up on path-level identity. Skip for
-    # JSON locales and markdown so we don't over-bias their key headings.
+    # Chunk cap — prevent OOM on files that produce thousands of chunks
+    if len(chunks) > CHUNK_CAP:
+        log.warning(
+            "truncating %s from %d to %d chunks (chunk_cap=%d)",
+            abs_path, len(chunks), CHUNK_CAP, CHUNK_CAP,
+        )
+        chunks = chunks[:CHUNK_CAP]
+
+    # Build embed-input texts (with optional path boost)
     if language in ("typescript", "tsx", "csharp", "python", "go", "rust"):
         basename = os.path.basename(abs_path)
         parts = abs_path.split(os.sep)
@@ -86,24 +103,98 @@ def _process_file(
     else:
         texts = [c.content for c in chunks]
 
-    try:
-        embeds = embed_batch(texts)
-    except Exception as e:  # noqa: BLE001
-        log.warning("embed failed %s: %s", abs_path, e)
-        return ("error", 0)
-
+    # ── Memory-safe micro-batch embedding ──────────────────────────────
+    # For files with many chunks (large files), embed in micro-batches
+    # so we never hold all embeddings + all chunks in RAM simultaneously.
+    # After each micro-batch we stream the upsert to Qdrant and free the
+    # intermediate vectors.
+    total_chunks = len(chunks)
+    all_ok = True
     meta_base = derive_metadata(abs_path, repo, language)
-    metas = [meta_base for _ in chunks]
 
-    try:
-        upsert_file(None, repo, abs_path, file_hash, chunks, embeds, metas, language)
-    except Exception as e:  # noqa: BLE001
-        log.warning("upsert failed %s: %s", abs_path, e)
+    # Pre-delete old points for this file once
+    from .db import get_client, QDRANT_COLLECTION
+    from qdrant_client.http.models import Filter, FieldCondition, MatchValue
+    client = get_client()
+    client.delete(
+        collection_name=QDRANT_COLLECTION,
+        points_selector=Filter(
+            must=[FieldCondition(key="file_path", match=MatchValue(value=abs_path))]
+        ),
+    )
+
+    for start in range(0, total_chunks, _EMBED_MICRO_BATCH):
+        end = min(start + _EMBED_MICRO_BATCH, total_chunks)
+        batch_texts = texts[start:end]
+        batch_chunks = chunks[start:end]
+        batch_metas = [meta_base for _ in batch_chunks]
+
+        try:
+            batch_embeds = embed_batch(batch_texts)
+        except Exception as e:  # noqa: BLE001
+            log.warning("embed failed %s (batch %d-%d): %s", abs_path, start, end, e)
+            all_ok = False
+            break
+
+        # Stream upsert this micro-batch directly to Qdrant
+        from qdrant_client.http.models import PointStruct
+        from .db import _point_id
+        points = []
+        for ch, vec, meta in zip(batch_chunks, batch_embeds, batch_metas):
+            payload = {
+                "repo": repo,
+                "file_path": abs_path,
+                "file_hash": file_hash,
+                "chunk_index": ch.chunk_index,
+                "start_line": ch.start_line,
+                "end_line": ch.end_line,
+                "language": language,
+                "symbol_kind": ch.symbol_kind,
+                "symbol_name": ch.symbol_name,
+                "content": ch.content,
+                "content_tokens": ch.content_tokens,
+            }
+            for k in ("role", "atomic_layer", "is_test", "is_story", "route_owner"):
+                if k in meta:
+                    payload[k] = meta[k]
+            points.append(
+                PointStruct(
+                    id=_point_id(abs_path, ch.chunk_index),
+                    vector=list(vec),
+                    payload=payload,
+                )
+            )
+        for i in range(0, len(points), 64):
+            client.upsert(
+                collection_name=QDRANT_COLLECTION,
+                points=points[i : i + 64],
+                wait=False,
+            )
+
+        # Free this micro-batch's memory before the next one
+        del batch_texts, batch_embeds, batch_chunks, batch_metas, points
+        gc.collect()
+
+    del texts
+    gc.collect()
+
+    # Update file index sidecar
+    from .db import _load_file_index, _save_file_index
+    fidx = _load_file_index()
+    fidx[abs_path] = {
+        "repo": repo,
+        "file_hash": file_hash,
+        "chunk_count": total_chunks,
+        "language": language,
+    }
+    _save_file_index(fidx)
+
+    if not all_ok:
         return ("error", 0)
 
     if verbose:
-        log.info("indexed %s (%d chunks) in %.2fs", abs_path, len(chunks), time.time() - t0)
-    return ("indexed", len(chunks))
+        log.info("indexed %s (%d chunks) in %.2fs", abs_path, total_chunks, time.time() - t0)
+    return ("indexed", total_chunks)
 
 
 def cmd_reindex(args):
@@ -163,21 +254,16 @@ def _run_index(force: bool, verbose: bool, single_file: str | None):
             n_error += 1
         gc.collect()
         if i and i % 200 == 0:
-            # Hard memory-pressure relief every 200 files. Both backends
-            # leak through their HTTP / model layers on long runs:
-            #   • local-minilm → PyTorch intermediate buffers
-            #   • cohere       → httpx connection pool + Pydantic
-            #                    response objects (~50 MB / 1000 calls)
-            # Drop both module-level handles + force a full GC.
-            import indexer.embed as _em  # type: ignore[import-not-found]
-            _em._model = None
-            _em._cohere_client = None
+            # Hard memory-pressure relief every 200 files.
+            # teardown_provider() closes the Cohere httpx pool (if Cohere)
+            # and releases the local model (if local), then GC reclaims.
+            teardown_provider()
             gc.collect()
             # Log RSS so OOM regressions are visible.
             try:
                 import resource
                 rss_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss // 1024
-                log.info("memory cycle at file %d — RSS peak %d MB", i, rss_mb)
+                log.info("memory cycle at file %d — RSS peak %d MB (limit %d MB)", i, rss_mb, MAX_RSS_MB)
             except Exception:  # noqa: BLE001
                 pass
 

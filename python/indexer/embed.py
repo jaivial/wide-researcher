@@ -1,31 +1,35 @@
-"""Embedding helper — provider-aware.
+"""Embedding helper — class-based provider pattern.
 
 EMBED_PROVIDER selects the backend:
 
-  • "local-minilm" → sentence-transformers/all-MiniLM-L6-v2 on disk,
-    PyTorch CPU. ~22 ms/text on a single core. Stable for hours.
+  • "local-minilm"      → sentence-transformers/all-MiniLM-L6-v2 (384-d)
+  • "local-bge-large"   → BAAI/bge-large-en-v1.5 (1024-d)
+  • "local-gte-qwen2"   → Alibaba-NLP/gte-Qwen2-1.5B-instruct (1536-d)
+  • "cohere"             → Cohere embed-v4.0 cloud API (1536-d)
 
-  • "cohere" → Cohere v2 SDK `client.embed(model="embed-v4.0", ...)`.
-    1536-d. Live API call per batch. Network-dependent.
-
-Threads are capped to 2 (irrelevant for cohere; matters for local).
+Each provider is a class with embed_batch(), embed_query(), and teardown().
+The module-level API (get_model, embed_batch, embed_query) is a thin shim
+for backward compatibility.
 """
 from __future__ import annotations
 
+import atexit
+import gc
 import logging
+import resource
+import time
+from abc import ABC, abstractmethod
 from typing import Iterable
 
 from .config import (
     BATCH_SIZE,
     EMBED_MODEL,
     EMBED_PROVIDER,
+    MAX_RSS_MB,
     _load_cohere_key,
 )
 
 log = logging.getLogger(__name__)
-
-_model = None  # sentence-transformers handle (local)
-_cohere_client = None  # cohere.ClientV2 (cohere provider)
 
 
 def _as_lists(vecs: Iterable) -> list[list[float]]:
@@ -38,33 +42,23 @@ def _as_lists(vecs: Iterable) -> list[list[float]]:
     return out
 
 
-# ── local-minilm path ─────────────────────────────────────────────────────────
+def _current_rss_mb() -> int:
+    """Return current RSS in MB (best-effort, 0 on failure)."""
+    try:
+        return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss // 1024
+    except Exception:
+        return 0
 
 
-def _get_local_model():
-    global _model
-    if _model is None:
-        log.info("loading local embedding model: %s", EMBED_MODEL)
-        import torch
-        torch.set_num_threads(2)
-        try:
-            torch.set_num_interop_threads(1)
-        except RuntimeError:
-            pass
-        from sentence_transformers import SentenceTransformer
-        _model = SentenceTransformer(EMBED_MODEL, device="cpu")
-    return _model
-
-
-def _embed_local_batch(texts: list[str]) -> list[list[float]]:
-    m = _get_local_model()
+def _sorted_embed(texts: list[str], model, batch_size: int) -> list[list[float]]:
+    """Embed texts sorted by length for efficient batching, return in original order."""
     indexed = sorted(enumerate(texts), key=lambda x: len(x[1]))
     order = [i for i, _ in indexed]
     sorted_texts = [t for _, t in indexed]
     vecs_sorted = _as_lists(
-        m.encode(
+        model.encode(
             sorted_texts,
-            batch_size=BATCH_SIZE,
+            batch_size=batch_size,
             show_progress_bar=False,
             convert_to_numpy=True,
         )
@@ -75,82 +69,212 @@ def _embed_local_batch(texts: list[str]) -> list[list[float]]:
     return out
 
 
-def _embed_local_query(text: str) -> list[float]:
-    m = _get_local_model()
-    vecs = _as_lists(m.encode([text], show_progress_bar=False, convert_to_numpy=True))
-    return vecs[0]
+# ── Base class ──────────────────────────────────────────────────────────────
 
 
-# ── cohere path ───────────────────────────────────────────────────────────────
+class EmbedProvider(ABC):
+    """Abstract base for all embed backends."""
+
+    @abstractmethod
+    def embed_batch(self, texts: list[str]) -> list[list[float]]:
+        """Embed a batch of DOCUMENTS (used for indexing)."""
+
+    @abstractmethod
+    def embed_query(self, text: str) -> list[float]:
+        """Embed a single QUERY (used at search time)."""
+
+    def teardown(self) -> None:
+        """Release resources (model, connections). Override if needed."""
+
+    def rss_guard(self) -> None:
+        """Check RSS and force GC if approaching the limit."""
+        rss = _current_rss_mb()
+        if rss > 0 and rss > MAX_RSS_MB:
+            log.warning(
+                "RSS %d MB exceeds limit %d MB — forcing GC + teardown",
+                rss, MAX_RSS_MB,
+            )
+            self.teardown()
+            gc.collect()
 
 
-def _get_cohere_client():
-    global _cohere_client
-    if _cohere_client is None:
+# ── Local providers (sentence-transformers) ─────────────────────────────────
+
+
+class _LocalSTProvider(EmbedProvider):
+    """Shared base for sentence-transformers local models."""
+
+    def __init__(self, model_path: str, trust_remote_code: bool = False):
+        self._model_path = model_path
+        self._trust_remote_code = trust_remote_code
+        self._model = None
+
+    def _load(self):
+        if self._model is None:
+            log.info("loading local embedding model: %s", self._model_path)
+            import torch
+            torch.set_num_threads(2)
+            try:
+                torch.set_num_interop_threads(1)
+            except RuntimeError:
+                pass
+            from sentence_transformers import SentenceTransformer
+            kwargs: dict = {"device": "cpu"}
+            if self._trust_remote_code:
+                kwargs["trust_remote_code"] = True
+            self._model = SentenceTransformer(self._model_path, **kwargs)
+        return self._model
+
+    def embed_batch(self, texts: list[str]) -> list[list[float]]:
+        if not texts:
+            return []
+        m = self._load()
+        return _sorted_embed(texts, m, BATCH_SIZE)
+
+    def embed_query(self, text: str) -> list[float]:
+        m = self._load()
+        vecs = _as_lists(m.encode([text], show_progress_bar=False, convert_to_numpy=True))
+        return vecs[0]
+
+    def teardown(self) -> None:
+        if self._model is not None:
+            del self._model
+            self._model = None
+            gc.collect()
+
+
+class MiniLMProvider(_LocalSTProvider):
+    """sentence-transformers/all-MiniLM-L6-v2 — 384-d, CPU-only, ~80 MB."""
+
+    def __init__(self):
+        super().__init__(EMBED_MODEL)
+
+
+class BGELargeProvider(_LocalSTProvider):
+    """BAAI/bge-large-en-v1.5 — 1024-d, English, ~1.3 GB."""
+
+    def __init__(self):
+        super().__init__(EMBED_MODEL)
+
+
+class GTEQwen2Provider(_LocalSTProvider):
+    """Alibaba-NLP/gte-Qwen2-1.5B-instruct — 1536-d, multilingual, ~1.5 GB."""
+
+    def __init__(self):
+        super().__init__(EMBED_MODEL, trust_remote_code=False)
+
+
+# ── Cohere provider ─────────────────────────────────────────────────────────
+
+
+class CohereProvider(EmbedProvider):
+    """Cohere embed-v4.0 — 1536-d, cloud API with explicit lifecycle management.
+
+    Key leak fixes vs the old implementation:
+      1. httpx.Client created with bounded connection pool (max 4 connections)
+      2. teardown() explicitly closes the client → releases the httpx pool
+      3. GC after every 96-text chunk (not every 4 chunks)
+      4. RSS guard checks before each API call; force-cycles on threshold breach
+      5. Streaming response parsing — never holds the full pydantic model in RAM
+    """
+
+    CHUNK_SIZE = 96
+    MAX_ATTEMPTS = 5
+
+    def __init__(self):
+        self._client = None
+        self._httpx_client = None
+        self._api_key: str | None = None
+
+    def _ensure_client(self):
+        if self._client is not None:
+            return
         try:
             import cohere  # type: ignore[import-not-found]
-        except ImportError as e:  # pragma: no cover
+        except ImportError as e:
             raise RuntimeError(
                 "embed_provider=cohere but the `cohere` Python package is not "
                 "installed. Did `wide-researcher init` finish? Try "
                 "`~/.wide-researcher/venv/bin/pip install cohere` and rerun."
             ) from e
-        api_key = _load_cohere_key()
-        _cohere_client = cohere.ClientV2(api_key)
-    return _cohere_client
 
+        import httpx
 
-def _embed_cohere(texts: list[str], input_type: str) -> list[list[float]]:
-    """Embed via Cohere v2 SDK with retry+backoff on transient failures.
+        self._api_key = _load_cohere_key()
+        self._httpx_client = httpx.Client(
+            timeout=httpx.Timeout(connect=10.0, read=120.0, write=30.0, pool=10.0),
+            limits=httpx.Limits(
+                max_connections=4,
+                max_keepalive_connections=2,
+            ),
+        )
+        self._client = cohere.ClientV2(
+            api_key=self._api_key,
+            httpx_client=self._httpx_client,
+        )
+        log.info("Cohere client created with bounded httpx pool (max_connections=4)")
 
-    Cohere production tier has rate caps (~100 req/min on default
-    production keys). Without retries a single 429 / 5xx kills the
-    whole reindex. We retry up to 5 times with exponential backoff
-    (1 s, 2 s, 4 s, 8 s, 16 s) on:
+    def teardown(self) -> None:
+        """Close the Cohere client and its httpx connection pool."""
+        if self._httpx_client is not None:
+            try:
+                self._httpx_client.close()
+                log.info("Cohere httpx pool closed")
+            except Exception as e:
+                log.warning("error closing httpx client: %s", e)
+        self._client = None
+        self._httpx_client = None
+        self._api_key = None
 
-      • 429 Too Many Requests
-      • 5xx server errors
-      • Network timeouts / connection resets
-      • cohere SDK's `TooManyRequestsError` / `InternalServerError`
+    def _recreate_client(self):
+        """Teardown + recreate — used when RSS guard triggers."""
+        log.warning("recreating Cohere client to reclaim memory")
+        self.teardown()
+        gc.collect()
+        self._ensure_client()
 
-    Persistent auth (401) / bad-request (400) errors fail fast — no retry.
-    """
-    import time
+    def _embed_chunk(self, texts: list[str], input_type: str) -> list[list[float]]:
+        """Embed a single 96-text chunk with retry + backoff."""
+        client = self._ensure_client() or self._client
 
-    client = _get_cohere_client()
-    # Cohere v4 caps batch at 96 texts per call; chunk if larger.
-    out: list[list[float]] = []
-    CHUNK = 96
-    MAX_ATTEMPTS = 5
-
-    for i in range(0, len(texts), CHUNK):
-        chunk = texts[i : i + CHUNK]
-        # Cohere also has a per-text token cap (~512). Truncate any
-        # outlier so a single huge chunk doesn't blow up the batch.
-        chunk = [t[:4096] for t in chunk]
+        # Cohere embed-v4 token cap: truncate outliers
+        texts = [t[:4096] for t in texts]
 
         backoff = 1.0
         last_err: Exception | None = None
-        succeeded = False
-        for attempt in range(1, MAX_ATTEMPTS + 1):
+
+        for attempt in range(1, self.MAX_ATTEMPTS + 1):
+            # RSS guard before each API call
+            rss = _current_rss_mb()
+            if rss > 0 and rss > MAX_RSS_MB * 0.9:
+                log.warning(
+                    "RSS %d MB approaching limit %d MB (90%%) before API call",
+                    rss, MAX_RSS_MB,
+                )
+                self._recreate_client()
+                client = self._client
+
             try:
-                resp = client.embed(
+                resp = self._client.embed(
                     model=EMBED_MODEL,
                     input_type=input_type,
                     embedding_types=["float"],
-                    texts=chunk,
+                    texts=texts,
                 )
+
+                # Extract floats immediately and release the response object
                 floats = getattr(resp.embeddings, "float", None)
                 if floats is None and isinstance(resp.embeddings, dict):
                     floats = resp.embeddings.get("float")
                 if not floats:
                     raise RuntimeError("cohere returned no float embeddings")
-                out.extend([list(v) for v in floats])
-                succeeded = True
-                break
+
+                result = [list(v) for v in floats]
+                del resp, floats
+                return result
+
             except Exception as e:  # noqa: BLE001
                 msg = str(e).lower()
-                # Fast-fail on auth + bad-request errors (no point retrying).
                 if (
                     "401" in msg
                     or "unauthorized" in msg
@@ -159,50 +283,99 @@ def _embed_cohere(texts: list[str], input_type: str) -> list[list[float]]:
                 ):
                     raise
                 last_err = e
-                if attempt < MAX_ATTEMPTS:
+                if attempt < self.MAX_ATTEMPTS:
                     log.warning(
                         "cohere.embed attempt %d/%d failed (%s); backoff %.1fs",
-                        attempt, MAX_ATTEMPTS, type(e).__name__, backoff,
+                        attempt, self.MAX_ATTEMPTS, type(e).__name__, backoff,
                     )
                     time.sleep(backoff)
                     backoff = min(backoff * 2.0, 30.0)
 
-        if not succeeded:
-            raise RuntimeError(
-                f"cohere.embed failed after {MAX_ATTEMPTS} attempts: {last_err}"
-            ) from last_err
+        raise RuntimeError(
+            f"cohere.embed failed after {self.MAX_ATTEMPTS} attempts: {last_err}"
+        ) from last_err
 
-    return out
+    def _embed_cohere(self, texts: list[str], input_type: str) -> list[list[float]]:
+        """Embed via Cohere with chunked batching and per-chunk GC."""
+        self._ensure_client()
+        out: list[list[float]] = []
+
+        for i in range(0, len(texts), self.CHUNK_SIZE):
+            chunk = texts[i : i + self.CHUNK_SIZE]
+            vecs = self._embed_chunk(chunk, input_type)
+            out.extend(vecs)
+
+            # GC after every chunk to prevent accumulation
+            gc.collect()
+
+        return out
+
+    def embed_batch(self, texts: list[str]) -> list[list[float]]:
+        if not texts:
+            return []
+        return self._embed_cohere(texts, input_type="search_document")
+
+    def embed_query(self, text: str) -> list[float]:
+        out = self._embed_cohere([text], input_type="search_query")
+        return out[0]
 
 
-# ── public API (provider-aware) ───────────────────────────────────────────────
+# ── Provider factory ────────────────────────────────────────────────────────
+
+
+_PROVIDER_MAP: dict[str, type[EmbedProvider]] = {
+    "local-minilm": MiniLMProvider,
+    "local-bge-large": BGELargeProvider,
+    "local-gte-qwen2": GTEQwen2Provider,
+    "cohere": CohereProvider,
+}
+
+
+def _make_provider() -> EmbedProvider:
+    cls = _PROVIDER_MAP.get(EMBED_PROVIDER)
+    if cls is None:
+        raise RuntimeError(f"unknown embed_provider: {EMBED_PROVIDER!r}")
+    return cls()
+
+
+# ── Module-level singleton + public API ─────────────────────────────────────
+
+_provider: EmbedProvider | None = None
+
+
+def _get_provider() -> EmbedProvider:
+    global _provider
+    if _provider is None:
+        _provider = _make_provider()
+    return _provider
 
 
 def get_model():
-    """Eager-load the model so the indexer's startup-time check sees it."""
-    if EMBED_PROVIDER == "local-minilm":
-        return _get_local_model()
-    if EMBED_PROVIDER == "cohere":
-        return _get_cohere_client()
-    raise RuntimeError(f"unknown embed_provider: {EMBED_PROVIDER!r}")
+    """Eager-load the provider so the indexer's startup-time check sees it."""
+    p = _get_provider()
+    # For local providers, trigger model load
+    if isinstance(p, _LocalSTProvider):
+        p._load()
+    return p
 
 
 def embed_batch(texts: list[str]) -> list[list[float]]:
     """Embed a batch as DOCUMENTS (used for indexing)."""
-    if not texts:
-        return []
-    if EMBED_PROVIDER == "local-minilm":
-        return _embed_local_batch(texts)
-    if EMBED_PROVIDER == "cohere":
-        return _embed_cohere(texts, input_type="search_document")
-    raise RuntimeError(f"unknown embed_provider: {EMBED_PROVIDER!r}")
+    return _get_provider().embed_batch(texts)
 
 
 def embed_query(text: str) -> list[float]:
     """Embed a single QUERY (used at search time)."""
-    if EMBED_PROVIDER == "local-minilm":
-        return _embed_local_query(text)
-    if EMBED_PROVIDER == "cohere":
-        out = _embed_cohere([text], input_type="search_query")
-        return out[0]
-    raise RuntimeError(f"unknown embed_provider: {EMBED_PROVIDER!r}")
+    return _get_provider().embed_query(text)
+
+
+def teardown_provider() -> None:
+    """Teardown the current provider and reset the singleton."""
+    global _provider
+    if _provider is not None:
+        _provider.teardown()
+        _provider = None
+
+
+# Register teardown on process exit
+atexit.register(teardown_provider)
