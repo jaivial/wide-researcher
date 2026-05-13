@@ -1,0 +1,149 @@
+// wide-researcher CLI entry point.
+import { Command } from 'commander';
+import { runInit } from './commands/init.js';
+import { runAdd } from './commands/add.js';
+import { runReindex } from './commands/reindex.js';
+import { runStatus } from './commands/status.js';
+import { runSearch } from './commands/search.js';
+import { runUninstall } from './commands/uninstall.js';
+import { log } from './utils/log.js';
+const program = new Command();
+program
+    .name('wide-researcher')
+    .description('Qdrant-backed semantic code-search + impact-radius diagrams for Claude Code.')
+    .version('0.1.0-alpha.0');
+function fail(e) {
+    log.error(e.message);
+    process.exit(1);
+}
+program
+    .command('init')
+    .description('First-time setup on this machine: install Qdrant + embed model + indexer for the current project.')
+    .option('--force', 'Re-run every step even if already healthy')
+    .option('--no-watch', 'Skip the systemd/launchd watcher daemon (auto-watch is ON by default)')
+    .option('--no-supervisor', 'Skip systemd/launchd registration entirely (containers / CI)')
+    .option('--no-reindex', 'Skip the initial reindex (useful for smoke tests)')
+    .option('--embed-provider <provider>', 'Skip interactive picker. Values: local-minilm | local-bge-large | local-gte-qwen2 | cohere')
+    .option('--cohere-api-key <key>', 'Non-interactive Cohere key (use with --embed-provider cohere)')
+    .action(async (opts) => {
+    try {
+        await runInit({
+            force: opts.force,
+            // commander turns `--no-foo` into `foo: false`
+            noWatch: opts.watch === false,
+            noSupervisor: opts.supervisor === false,
+            noReindex: opts.reindex === false,
+            embedProvider: opts.embedProvider,
+            cohereApiKey: opts.cohereApiKey,
+        });
+    }
+    catch (e) {
+        fail(e);
+    }
+});
+program
+    .command('backups')
+    .description('List Qdrant collection backups for the current project.')
+    .option('--json', 'Machine-readable JSON output')
+    .action(async (opts) => {
+    try {
+        const { listBackups } = await import('./utils/qdrant-snapshot.js');
+        const { deriveProjectIdentity } = await import('./installers/claude-bundle.js');
+        const id = deriveProjectIdentity();
+        const list = await listBackups(id.slug);
+        if (opts.json) {
+            process.stdout.write(JSON.stringify(list, null, 2) + '\n');
+            return;
+        }
+        if (list.length === 0) {
+            process.stdout.write(`(no backups for ${id.slug})\n`);
+            return;
+        }
+        process.stdout.write(`Backups for ${id.slug}:\n`);
+        for (const b of list) {
+            process.stdout.write(`  ${b.timestamp}  provider=${b.provider}\n    ${b.absPath}\n`);
+        }
+    }
+    catch (e) {
+        fail(e);
+    }
+});
+program
+    .command('add')
+    .description('Add wide-researcher to a project on a machine that already has the global infra.')
+    .option('--force', 'Re-run every step even if already healthy')
+    .option('--no-watch', 'Skip the systemd/launchd watcher daemon')
+    .option('--no-supervisor', 'Skip systemd/launchd registration entirely')
+    .option('--no-reindex', 'Skip the initial reindex')
+    .option('--embed-provider <provider>', 'Skip interactive picker. Values: local-minilm | local-bge-large | local-gte-qwen2 | cohere')
+    .option('--cohere-api-key <key>', 'Non-interactive Cohere key')
+    .action(async (opts) => {
+    try {
+        await runAdd({
+            force: opts.force,
+            noWatch: opts.watch === false,
+            noSupervisor: opts.supervisor === false,
+            noReindex: opts.reindex === false,
+            embedProvider: opts.embedProvider,
+            cohereApiKey: opts.cohereApiKey,
+        });
+    }
+    catch (e) {
+        fail(e);
+    }
+});
+program
+    .command('reindex')
+    .description('Reindex the current project. Default = incremental; --force = full rebuild.')
+    .option('--force', 'Skip the hash check; re-embed every file regardless.')
+    .action(async (opts) => {
+    try {
+        await runReindex({ force: opts.force });
+    }
+    catch (e) {
+        fail(e);
+    }
+});
+program
+    .command('status')
+    .description('Show Qdrant health, indexer state, and last-index timestamp for the current project.')
+    .option('--json', 'Emit machine-readable JSON instead of the table view.')
+    .action(async (opts) => {
+    try {
+        await runStatus({ json: opts.json });
+    }
+    catch (e) {
+        fail(e);
+    }
+});
+program
+    .command('search <query>')
+    .description('Terminal-side smoke search against the current project collection.')
+    .option('-m, --mode <mode>', 'search mode: semantic | keyword | hybrid (default: semantic in v0.1)', 'semantic')
+    .option('-k, --top-k <n>', 'number of results', '10')
+    .action(async (query, opts) => {
+    try {
+        await runSearch(query, {
+            mode: opts.mode ?? 'semantic',
+            topK: opts.topK ? parseInt(opts.topK, 10) : 10,
+        });
+    }
+    catch (e) {
+        fail(e);
+    }
+});
+program
+    .command('uninstall')
+    .description('Remove wide-researcher from the current project. Use --all to also nuke ~/.wide-researcher/.')
+    .option('--all', 'Also remove global install (qdrant, model, venv, systemd units)')
+    .option('--drop-collection', 'Also drop the Qdrant collection (default: keep it for reinstall reuse)')
+    .action(async (opts) => {
+    try {
+        await runUninstall({ all: opts.all, dropCollection: opts.dropCollection });
+    }
+    catch (e) {
+        fail(e);
+    }
+});
+program.parse();
+//# sourceMappingURL=cli.js.map

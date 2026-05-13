@@ -1,7 +1,7 @@
 // `wide-researcher init` — first-time setup on this machine.
 //
 // Steps (each idempotent):
-//   0. Pick embed model (interactive — MiniLM-L6 or Cohere v4)
+//   0. Pick embed model (interactive — 4 options)
 //   1. Install global infra (qdrant + venv + embed model + supervisor)
 //   2. Derive project identity → write `<project>/.wide-researcher/config.json`
 //   3. Install Claude bundle (.claude/ + .mcp.json + hook)
@@ -20,6 +20,7 @@ import type { EmbedProvider } from '../models/registry.js';
 import { run } from '../utils/exec.js';
 import { log } from '../utils/log.js';
 import { pyPackageRoot, venvPython } from '../utils/paths.js';
+import { cleanStaleNpxCache } from '../utils/npx-cache.js';
 
 export interface InitOptions {
   cwd?: string;
@@ -38,6 +39,13 @@ export interface InitOptions {
 
 export async function runInit(opts: InitOptions = {}): Promise<void> {
   const cwd = opts.cwd ?? process.cwd();
+
+  // Clean stale npx caches from prior versions. npx caches packages under
+  // ~/.npm/_npx/<hash>/node_modules/wide-researcher/ and doesn't
+  // auto-evict old versions. When a user upgrades via `npx wide-researcher@latest`,
+  // the new version's JS runs but the old Python code may linger in a different
+  // cache slot. We nuke any cached version older than the current one.
+  cleanStaleNpxCache();
 
   log.step('0/6 · embed model selection');
   const pick = await pickEmbedModel({

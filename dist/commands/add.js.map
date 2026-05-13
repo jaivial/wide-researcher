@@ -1,0 +1,1 @@
+{"version":3,"file":"add.js","sourceRoot":"","sources":["../../src/commands/add.ts"],"names":[],"mappings":"AAAA,gEAAgE;AAChE,iEAAiE;AACjE,+BAA+B;AAE/B,OAAO,EAAE,OAAO,EAAoB,MAAM,WAAW,CAAC;AAItD,MAAM,CAAC,KAAK,UAAU,MAAM,CAAC,OAAmB,EAAE;IAChD,MAAM,OAAO,CAAC,EAAE,GAAG,IAAI,EAAE,WAAW,EAAE,IAAI,EAAE,CAAC,CAAC;AAChD,CAAC"}

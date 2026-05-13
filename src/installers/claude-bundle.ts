@@ -33,6 +33,8 @@ import {
   ensureDir,
   exists,
   miniLMPath,
+  bgeLargePath,
+  gteQwen2Path,
   pyPackageRoot,
   projectClaudeDir,
   projectConfigDir,
@@ -111,9 +113,18 @@ async function writeProjectConfig(
     embed_dim: model.embedDim,
     batch_size: 16,
     max_file_bytes: 200 * 1024,
+    // Always set file_index_path explicitly — prevents Path("") → "." bug
+    // in Python config.py when this key is absent.
+    file_index_path: path.join(projectConfigDir(id.projectRoot), '.file_index.json'),
   };
   if (model.provider === 'local-minilm') {
     cfg.model_path = miniLMPath();
+  }
+  if (model.provider === 'local-bge-large') {
+    cfg.model_path = bgeLargePath();
+  }
+  if (model.provider === 'local-gte-qwen2') {
+    cfg.model_path = gteQwen2Path();
   }
   if (model.provider === 'cohere') {
     cfg.secrets_path = secretsFilePath();
@@ -123,8 +134,46 @@ async function writeProjectConfig(
   }
 
   if (!force && (await exists(id.configPath))) {
-    log.skip(`project config already exists at ${id.configPath}`);
-    return;
+    // Config exists — check if the embed provider changed. If so, update
+    // the embed-related fields without touching the rest (excludes, etc.).
+    try {
+      const existing = JSON.parse(await fs.readFile(id.configPath, 'utf8')) as Record<string, unknown>;
+      if (existing.embed_provider === model.provider && existing.embed_dim === model.embedDim) {
+        log.skip(`project config already exists at ${id.configPath} (provider=${model.provider})`);
+        return;
+      }
+      // Provider changed — merge embed fields into existing config
+      existing.embed_provider = model.provider;
+      existing.embed_model = model.modelId;
+      existing.embed_dim = model.embedDim;
+      // Ensure file_index_path is always present (prevents Path("") bug)
+      if (!existing.file_index_path) {
+        existing.file_index_path = path.join(projectConfigDir(id.projectRoot), '.file_index.json');
+      }
+      delete existing.model_path;
+      delete existing.secrets_path;
+      delete existing.cohere_api_key_field;
+      delete existing.cohere_embedding_types;
+      if (model.provider === 'local-minilm') {
+        existing.model_path = miniLMPath();
+      }
+      if (model.provider === 'local-bge-large') {
+        existing.model_path = bgeLargePath();
+      }
+      if (model.provider === 'local-gte-qwen2') {
+        existing.model_path = gteQwen2Path();
+      }
+      if (model.provider === 'cohere') {
+        existing.secrets_path = secretsFilePath();
+        existing.cohere_api_key_field = model.apiKeySecretField;
+        existing.cohere_embedding_types = ['float'];
+      }
+      await fs.writeFile(id.configPath, JSON.stringify(existing, null, 2) + '\n', 'utf8');
+      log.ok(`updated ${id.configPath} (provider=${model.provider}, dim=${model.embedDim})`);
+      return;
+    } catch {
+      // Malformed config — rewrite from scratch
+    }
   }
   await fs.writeFile(id.configPath, JSON.stringify(cfg, null, 2) + '\n', 'utf8');
   log.ok(`wrote ${id.configPath} (provider=${model.provider}, dim=${model.embedDim})`);
