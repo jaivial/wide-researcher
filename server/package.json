@@ -1,0 +1,19 @@
+{
+  "name": "@kraken/code-search-mcp",
+  "version": "0.1.1",
+  "description": "Kraken qdrant semantic-search MCP server",
+  "type": "module",
+  "main": "server.js",
+  "publishConfig": { "access": "public" },
+  "bin": {
+    "kraken-code-search-mcp": "./server.js"
+  },
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.1",
+    "@qdrant/js-client-rest": "^1.18.0",
+    "dotenv": "^16.4.5"
+  }
+}
