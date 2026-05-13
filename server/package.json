@@ -1,5 +1,5 @@
 {
-  "name": "@kraken/code-search-mcp",
+  "name": "@jaivial/code-search-mcp",
   "version": "0.1.1",
   "description": "Kraken qdrant semantic-search MCP server",
   "type": "module",
