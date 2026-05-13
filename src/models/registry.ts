@@ -1,7 +1,7 @@
 // Pluggable embed-model registry. Add new providers here; the rest
 // of the pipeline branches on `provider`.
 
-export type EmbedProvider = 'local-minilm' | 'cohere';
+export type EmbedProvider = 'local-minilm' | 'local-bge-large' | 'local-gte-qwen2' | 'cohere';
 
 export interface EmbedModel {
   /** Internal key — drives the provider branch in Python + Node. */
@@ -33,6 +33,26 @@ export const EMBED_MODELS: Record<EmbedProvider, EmbedModel> = {
     requiresApiKey: false,
     pricingNote: 'free',
   },
+  'local-bge-large': {
+    provider: 'local-bge-large',
+    label: 'BGE-Large-en-v1.5 (free, local, recommended)',
+    description:
+      'BAAI/bge-large-en-v1.5 — 1024-d, English, 512 token context. ~1.3 GB download. 55% better than MiniLM. Best quality/speed on CPU.',
+    embedDim: 1024,
+    modelId: 'BAAI/bge-large-en-v1.5',
+    requiresApiKey: false,
+    pricingNote: 'free',
+  },
+  'local-gte-qwen2': {
+    provider: 'local-gte-qwen2',
+    label: 'GTE-Qwen2-1.5B (free, local)',
+    description:
+      'Alibaba-NLP/gte-Qwen2-1.5B-instruct — 1536-d, multilingual, 32K context. ~1.5 GB download. Matches Cohere v4 quality at zero cost. CPU-only (slow on first query).',
+    embedDim: 1536,
+    modelId: 'Alibaba-NLP/gte-Qwen2-1.5B-instruct',
+    requiresApiKey: false,
+    pricingNote: 'free',
+  },
   cohere: {
     provider: 'cohere',
     label: 'Cohere Embed v4 (paid, cloud API)',
@@ -52,4 +72,4 @@ export function modelById(provider: EmbedProvider): EmbedModel {
   return m;
 }
 
-export const DEFAULT_PROVIDER: EmbedProvider = 'local-minilm';
+export const DEFAULT_PROVIDER: EmbedProvider = 'local-bge-large';

@@ -12,8 +12,8 @@ export const EMBED_MODELS = {
     },
     'local-bge-large': {
         provider: 'local-bge-large',
-        label: 'BGE-Large-en-v1.5 (free, local)',
-        description: 'BAAI/bge-large-en-v1.5 — 1024-d, English, 512 token context. ~1.3 GB download. 55% better than MiniLM. CPU-only.',
+        label: 'BGE-Large-en-v1.5 (free, local, recommended)',
+        description: 'BAAI/bge-large-en-v1.5 — 1024-d, English, 512 token context. ~1.3 GB download. 55% better than MiniLM. Best quality/speed on CPU.',
         embedDim: 1024,
         modelId: 'BAAI/bge-large-en-v1.5',
         requiresApiKey: false,
@@ -45,5 +45,5 @@ export function modelById(provider) {
         throw new Error(`Unknown embed provider: ${provider}`);
     return m;
 }
-export const DEFAULT_PROVIDER = 'local-minilm';
+export const DEFAULT_PROVIDER = 'local-bge-large';
 //# sourceMappingURL=registry.js.map
