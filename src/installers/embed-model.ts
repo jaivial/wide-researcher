@@ -7,6 +7,7 @@
 // Idempotent: skips download if model dir exists AND can be
 // loaded inside the wide-researcher venv.
 
+import path from 'node:path';
 import { run } from '../utils/exec.js';
 import { log } from '../utils/log.js';
 import {
@@ -16,6 +17,7 @@ import {
   bgeLargePath,
   gteQwen2Path,
   modelsRoot,
+  pyPackageRoot,
   venvPython,
 } from '../utils/paths.js';
 import type { EmbedModel } from '../models/registry.js';
@@ -189,30 +191,12 @@ async function installCohere(model: EmbedModel): Promise<void> {
   }
   log.step(`Cohere ${model.modelId} — no local model to download. Verifying API.`);
 
-  // Probe script: if cohere is missing, install it first, then verify.
-  const probeScript =
-    `import os, sys\\n` +
-    `try:\\n` +
-    `    import cohere\\n` +
-    `except ImportError:\\n` +
-    `    print('cohere not installed, installing...', file=sys.stderr)\\n` +
-    `    import subprocess\\n` +
-    `    r = subprocess.run([sys.executable, '-m', 'pip', 'install', 'cohere>=5.13'],\\n` +
-    `                    capture_output=True, text=True)\\n` +
-    `    if r.returncode != 0:\\n` +
-    `        print('pip install cohere failed:', r.stderr, file=sys.stderr)\\n` +
-    `        sys.exit(2)\\n` +
-    `    print('cohere installed ok', file=sys.stderr)\\n` +
-    `client = cohere.ClientV2(${JSON.stringify(key)})\\n` +
-    `r = client.embed(\\n` +
-    `    model=${JSON.stringify(model.modelId)},\\n` +
-    `    input_type='search_document',\\n` +
-    `    embedding_types=['float'],\\n` +
-    `    texts=['probe'],\\n` +
-    `)\\n` +
-    `print('cohere ok, dim:', len(r.embeddings.float[0]))\\n`;
-
-  await run(venvPython(), ['-c', probeScript], { echo: true });
+  const probeScript = path.join(pyPackageRoot(), 'scripts', 'probe_cohere.py');
+  await run(
+    venvPython(),
+    [probeScript],
+    { echo: true, env: { ...process.env, COHERE_API_KEY: key, COHERE_EMBED_MODEL: model.modelId } },
+  );
 
   log.ok(`Cohere ${model.modelId} ready (API key validated)`);
 }
