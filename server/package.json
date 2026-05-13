@@ -1,6 +1,6 @@
 {
   "name": "@jaivial/code-search-mcp",
-  "version": "0.1.0-alpha.14",
+  "version": "0.1.0-alpha.15",
   "description": "Kraken qdrant semantic-search MCP server",
   "type": "module",
   "main": "server.js",
