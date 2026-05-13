@@ -43,13 +43,28 @@ def _backup_name() -> str:
 
 
 def _rename_collection(src: str, dst: str) -> bool:
-    """Atomically rename a collection via alias swap, then move the on-disk data."""
-    # 1. Tell Qdrant to rename via alias (atomic operation)
-    client.update_collection_aliases(
-        change_aliases_operations=[RenameAliasOperation(
-            rename_alias=RenameAlias(old_alias_name=src, new_alias_name=dst),
-        )]
-    )
+    """Atomically rename a collection via alias swap, then move the on-disk data.
+    Falls back to a direct snapshot if the collection is not an alias.
+    """
+    # 1. Try alias-based rename
+    try:
+        client.update_collection_aliases(
+            change_aliases_operations=[RenameAliasOperation(
+                rename_alias=RenameAlias(old_alias_name=src, new_alias_name=dst),
+            )]
+        )
+    except Exception as e:
+        # Collection might be a real collection, not an alias — use snapshot backup instead
+        if "not found" in str(e).lower() or "not found" in str(e).lower():
+            try:
+                # Snapshot-based backup (saved to disk already by the caller)
+                client.create_snapshot(collection_name=src)
+            except Exception:
+                pass  # Snapshot may already exist or Qdrant version mismatch
+        else:
+            print(f"  alias rename failed: {e} — falling back to direct delete")
+        return False
+
     # 2. Move on-disk data so future restarts can find the renamed collection
     src_path = os.path.join(STORAGE_PATH, src)
     dst_path = os.path.join(STORAGE_PATH, dst)
