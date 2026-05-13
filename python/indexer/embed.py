@@ -43,7 +43,21 @@ def _as_lists(vecs: Iterable) -> list[list[float]]:
 
 
 def _current_rss_mb() -> int:
-    """Return current RSS in MB (best-effort, 0 on failure)."""
+    """Return CURRENT RSS in MB (not peak). Uses /proc/self/status on Linux."""
+    try:
+        with open("/proc/self/status", encoding="utf-8") as f:
+            for line in f:
+                if line.startswith("VmRSS:"):
+                    # VmRSS is in kB
+                    return int(line.split()[1]) // 1024
+    except Exception:
+        pass
+    try:
+        import psutil  # type: ignore[import-not-found]
+        return int(psutil.Process().memory_info().rss / (1024 * 1024))
+    except Exception:
+        pass
+    # Fallback: ru_maxrss (peak, not current — inaccurate but better than 0)
     try:
         return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss // 1024
     except Exception:

@@ -67,6 +67,20 @@ export async function runInit(opts = {}) {
         if (opts.noReindex) {
             log.skip('5/6 · initial reindex (skipped via --no-reindex)');
         }
+        else if (model.provider === 'cohere') {
+            // Cohere provider: use subprocess-per-file bulk_reindex to prevent
+            // httpx/pydantic memory leaks from accumulating in a single process.
+            // Each file runs in a fresh subprocess — kernel reclaims ALL memory.
+            log.step('5/6 · initial reindex (subprocess-per-file for Cohere — memory-safe)');
+            await run(venvPython(), ['-m', 'scripts.bulk_reindex', '--force'], {
+                cwd: pyPackageRoot(),
+                env: {
+                    ...process.env,
+                    WIDE_RESEARCHER_PROJECT_CONFIG: id.configPath,
+                },
+                echo: true,
+            });
+        }
         else {
             log.step('5/6 · initial reindex (this takes a minute or two)');
             await run(venvPython(), ['-m', 'indexer', 'reindex', '--force'], {
