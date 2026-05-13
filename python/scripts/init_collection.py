@@ -46,7 +46,7 @@ def _rename_collection(src: str, dst: str) -> bool:
     """Atomically rename a collection via alias swap, then move the on-disk data."""
     # 1. Tell Qdrant to rename via alias (atomic operation)
     client.update_collection_aliases(
-        actions=[RenameAliasOperation(
+        change_aliases_operations=[RenameAliasOperation(
             rename_alias=RenameAlias(old_alias_name=src, new_alias_name=dst),
         )]
     )
