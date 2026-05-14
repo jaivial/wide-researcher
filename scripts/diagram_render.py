@@ -1,10 +1,10 @@
-"""React-Flow based renderer for wide-researcher impact diagrams.
+"""React-Flow based renderer for kraken-wide-research impact diagrams.
 
 Emits a standalone HTML file that loads React + ReactDOM + reactflow via
 esm.sh at runtime. No build step, no bundler. Open in any modern browser
 with network access; data is inlined as JSON.
 
-Public entry: render_html(prompt, files, slug, generated_at, project_root=None) -> str
+Public entry: render_html(prompt, files, slug, generated_at) -> str
 """
 from __future__ import annotations
 
@@ -15,19 +15,13 @@ import os
 from typing import Iterable
 
 # Generous radii for clear card spacing even with 100 files (card min-width 240px).
-# With ring 0 at 800px: 15 cards -> 2*800*sin(12°) = 333px center dist -> 93px gap
-# Ring 2 at 1400px: 30 cards -> 2*1400*sin(6°) = 293px center dist -> 53px gap
+# With ring 0 at 800px: 15 cards → 2*800*sin(12°) = 333px center dist → 93px gap
+# Ring 2 at 1400px: 30 cards → 2*1400*sin(6°) = 293px center dist → 53px gap
 RING_RADII_PX = [800, 1100, 1400, 1700]
-
-# Set by render_html() before any _short() call. The renderer trims this prefix
-# from absolute paths so cards stay readable.
-_PROJECT_ROOT_TRAILING_SEP: str = ""
 
 
 def _short(path: str) -> str:
-    if _PROJECT_ROOT_TRAILING_SEP and path.startswith(_PROJECT_ROOT_TRAILING_SEP):
-        return path[len(_PROJECT_ROOT_TRAILING_SEP):]
-    return path
+    return path.replace("/var/www/kraken/", "")
 
 
 def _ring_for(rank: int, total: int) -> int:
@@ -360,19 +354,7 @@ createRoot(document.getElementById('root')).render(React.createElement(App));
 """
 
 
-def render_html(
-    prompt: str,
-    files: list[dict],
-    slug: str,
-    generated_at: str,
-    project_root: str | None = None,
-) -> str:
-    global _PROJECT_ROOT_TRAILING_SEP
-    if project_root:
-        _PROJECT_ROOT_TRAILING_SEP = project_root.rstrip(os.sep) + os.sep
-    else:
-        _PROJECT_ROOT_TRAILING_SEP = ""
-
+def render_html(prompt: str, files: list[dict], slug: str, generated_at: str) -> str:
     payload = _build_payload(prompt, files, slug, generated_at)
     payload_json = json.dumps(payload, ensure_ascii=False)
     safe_prompt = html_lib.escape(prompt)
@@ -383,7 +365,7 @@ def render_html(
     return f"""<!doctype html>
 <html lang="en"><head>
 <meta charset="utf-8">
-<title>wide-researcher · {safe_slug}</title>
+<title>kraken-wide-research · {safe_slug}</title>
 <link rel="stylesheet" href="https://esm.sh/reactflow@11.11.4/dist/style.css">
 <style>
   :root {{
@@ -413,7 +395,7 @@ def render_html(
   }}
   .origin-card small {{
     display:block; color:#aacbff; font-weight:400;
-    text-transform:uppercase; font-size:.62rem; letter-spacing:.1em; margin-bottom:.4rem;
+    text-transform:uppercase; font-size:.65rem; letter-spacing:.12em; margin-bottom:.5rem;
   }}
   .origin-prompt {{ font-weight: 600; }}
 
@@ -457,7 +439,7 @@ def render_html(
 </style>
 </head><body>
 <header>
-  <h1>wide-researcher · impact radius</h1>
+  <h1>kraken-wide-research · impact radius</h1>
   <span id="hint"></span>
   <div class="meta">{safe_slug} · {safe_gen} · {len(payload['nodes']) - 1} files · {len(payload['edges'])} edges</div>
 </header>
