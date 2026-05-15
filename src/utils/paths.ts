@@ -45,6 +45,14 @@ export function miniLMPath(): string {
   return path.join(modelsRoot(), 'all-MiniLM-L6-v2');
 }
 
+export function gteQwen2Path(): string {
+  return path.join(modelsRoot(), 'gte-Qwen2-1.5B-instruct');
+}
+
+export function bgeLargePath(): string {
+  return path.join(modelsRoot(), 'bge-large-en-v1.5');
+}
+
 export function venvRoot(): string {
   return path.join(globalRoot(), 'venv');
 }

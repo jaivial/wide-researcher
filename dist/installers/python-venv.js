@@ -54,7 +54,7 @@ async function venvIsHealthy() {
         await run(venvPython(), [
             '-c',
             'import qdrant_client, sentence_transformers, torch, tree_sitter, ' +
-                'tree_sitter_languages, huggingface_hub, watchdog, requests',
+                'tree_sitter_languages, huggingface_hub, watchdog, requests, cohere',
         ], { capture: true });
         return true;
     }

@@ -64,6 +64,7 @@ EXCLUDE_DIR_NAMES = {
     "storybook-build",
     ".storybook-cache",
     ".wide-researcher",  # don't index our own sidecar
+    "screenshots",         # qa / debug screenshots
 }
 EXCLUDE_DIR_NAMES.update(EXTRA_EXCLUDE_DIR_NAMES)
 
@@ -99,6 +100,14 @@ EXCLUDE_FILE_PATTERNS = [
     _re.compile(r"^run-\d+.*\.json$"),
     _re.compile(r"^trace-\d+.*\.json$"),
     _re.compile(r"-logs\.json$"),
+    # Icon font selection files (large, generated, low semantic value)
+    _re.compile(r"^selection\.json$"),
+    # .NET post-process coverage / profiling XML dumps
+    _re.compile(r"\.pp\.xml$"),
+    # tsbuildinfo (generated, huge, no semantic value)
+    _re.compile(r"\.tsbuildinfo$"),
+    # Backup files (dead code, previous versions)
+    _re.compile(r"\.backup\d*$"),
 ]
 for extra in EXTRA_EXCLUDE_FILE_PATTERNS:
     try:
@@ -146,6 +155,8 @@ BINARY_SUFFIXES = {
     ".map",
     # IDE / project lockish stuff
     ".suo", ".user",
+    # 3D model binaries
+    ".blend", ".glb", ".gltf", ".fbx", ".obj", ".stl", ".dae",
     # other binaries
     ".class", ".jar", ".war", ".ear", ".bin", ".dat", ".pyc", ".pyo",
 }

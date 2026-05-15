@@ -23,6 +23,7 @@ function buildFilter(opts) {
 function payloadToResult(point) {
     const p = (point.payload ?? {});
     const content = typeof p.content === 'string' ? p.content : '';
+    const startLine = typeof p.start_line === 'number' ? p.start_line : 1;
     return {
         id: point.id,
         file_path: p.file_path,
@@ -34,6 +35,10 @@ function payloadToResult(point) {
         symbol_kind: p.symbol_kind ?? null,
         symbol_name: p.symbol_name ?? null,
         preview: content.slice(0, 500),
+        code_lines: content.split(/\r?\n/).map((text, idx) => ({
+            line: startLine + idx,
+            text,
+        })),
         score: point.score ?? null,
     };
 }

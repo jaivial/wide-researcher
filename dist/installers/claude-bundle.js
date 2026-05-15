@@ -60,7 +60,7 @@ async function writeProjectConfig(id, model, force) {
         embed_model: model.modelId,
         embed_dim: model.embedDim,
         batch_size: 16,
-        max_file_bytes: 1024 * 1024,
+        max_file_bytes: 50 * 1024 * 1024,
         // Always set file_index_path explicitly — prevents Path("") → "." bug
         // in Python config.py when this key is absent.
         file_index_path: path.join(projectConfigDir(id.projectRoot), '.file_index.json'),

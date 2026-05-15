@@ -33,7 +33,7 @@ program
   .option('--no-watch', 'Skip the systemd/launchd watcher daemon (auto-watch is ON by default)')
   .option('--no-supervisor', 'Skip systemd/launchd registration entirely (containers / CI)')
   .option('--no-reindex', 'Skip the initial reindex (useful for smoke tests)')
-  .option('--embed-provider <provider>', 'Skip interactive picker. Values: local-minilm | cohere')
+  .option('--embed-provider <provider>', 'Skip interactive picker. Values: local-minilm | local-bge-large | local-gte-qwen2 | cohere')
   .option('--cohere-api-key <key>', 'Non-interactive Cohere key (use with --embed-provider cohere)')
   .action(
     async (opts: {
@@ -41,7 +41,7 @@ program
       watch?: boolean;
       supervisor?: boolean;
       reindex?: boolean;
-      embedProvider?: 'local-minilm' | 'cohere';
+      embedProvider?: 'local-minilm' | 'local-bge-large' | 'local-gte-qwen2' | 'cohere';
       cohereApiKey?: string;
     }) => {
       try {
@@ -94,7 +94,7 @@ program
   .option('--no-watch', 'Skip the systemd/launchd watcher daemon')
   .option('--no-supervisor', 'Skip systemd/launchd registration entirely')
   .option('--no-reindex', 'Skip the initial reindex')
-  .option('--embed-provider <provider>', 'Skip interactive picker. Values: local-minilm | cohere')
+  .option('--embed-provider <provider>', 'Skip interactive picker. Values: local-minilm | local-bge-large | local-gte-qwen2 | cohere')
   .option('--cohere-api-key <key>', 'Non-interactive Cohere key')
   .action(
     async (opts: {
@@ -102,7 +102,7 @@ program
       watch?: boolean;
       supervisor?: boolean;
       reindex?: boolean;
-      embedProvider?: 'local-minilm' | 'cohere';
+      embedProvider?: 'local-minilm' | 'local-bge-large' | 'local-gte-qwen2' | 'cohere';
       cohereApiKey?: string;
     }) => {
       try {

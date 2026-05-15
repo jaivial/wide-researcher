@@ -40,7 +40,7 @@ const TOOLS = [
   {
     name: 'wr_find',
     description:
-      'Unified codebase search (Qdrant + MiniLM-L6). One tool, three modes: semantic (vector similarity — best for concepts), keyword (full-text on payload — best for literal identifiers like "useEffect"), hybrid (default — Qdrant native RRF fusion). Returns top-k chunks with file path, line range, symbol info, and a 500-char preview.',
+      'Unified codebase search (Qdrant + MiniLM-L6). One tool, three modes: semantic (vector similarity — best for concepts), keyword (full-text on payload — best for literal identifiers like "useEffect"), hybrid (default — Qdrant native RRF fusion). Returns top-k chunks with file path, line range, symbol info, a 500-char preview, and numbered code_lines for the matched chunk.',
     inputSchema: {
       type: 'object',
       properties: {

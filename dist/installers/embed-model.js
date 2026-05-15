@@ -6,9 +6,10 @@
 //
 // Idempotent: skips download if model dir exists AND can be
 // loaded inside the wide-researcher venv.
+import path from 'node:path';
 import { run } from '../utils/exec.js';
 import { log } from '../utils/log.js';
-import { ensureDir, exists, miniLMPath, bgeLargePath, gteQwen2Path, modelsRoot, venvPython, } from '../utils/paths.js';
+import { ensureDir, exists, miniLMPath, bgeLargePath, gteQwen2Path, modelsRoot, pyPackageRoot, venvPython, } from '../utils/paths.js';
 import { getSecret } from '../utils/secrets.js';
 export const EMBED_MODEL_ID = 'sentence-transformers/all-MiniLM-L6-v2';
 export const BGE_LARGE_MODEL_ID = 'BAAI/bge-large-en-v1.5';
@@ -134,23 +135,8 @@ async function installCohere(model) {
             `Re-run \`wide-researcher init\` and complete the embed-model picker.`);
     }
     log.step(`Cohere ${model.modelId} — no local model to download. Verifying API.`);
-    await run(venvPython(), [
-        '-c',
-        `import os, sys\n` +
-            `try:\n` +
-            `    import cohere\n` +
-            `except ImportError:\n` +
-            `    print('cohere library missing', file=sys.stderr)\n` +
-            `    sys.exit(2)\n` +
-            `client = cohere.ClientV2(${JSON.stringify(key)})\n` +
-            `r = client.embed(\n` +
-            `    model=${JSON.stringify(model.modelId)},\n` +
-            `    input_type='search_document',\n` +
-            `    embedding_types=['float'],\n` +
-            `    texts=['probe'],\n` +
-            `)\n` +
-            `print('cohere ok, dim:', len(r.embeddings.float[0]))\n`,
-    ], { echo: true });
+    const probeScript = path.join(pyPackageRoot(), 'scripts', 'probe_cohere.py');
+    await run(venvPython(), [probeScript], { echo: true, env: { ...process.env, COHERE_API_KEY: key, COHERE_EMBED_MODEL: model.modelId } });
     log.ok(`Cohere ${model.modelId} ready (API key validated)`);
 }
 export async function installEmbedModel(opts) {

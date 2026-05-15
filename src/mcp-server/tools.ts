@@ -30,6 +30,7 @@ interface SearchResult {
   symbol_kind?: string | null;
   symbol_name?: string | null;
   preview: string;
+  code_lines: Array<{ line: number; text: string }>;
   score: number | null;
 }
 
@@ -54,6 +55,7 @@ function buildFilter(opts: FilterOpts): { must: Record<string, unknown>[] } | un
 function payloadToResult(point: QdrantPoint): SearchResult {
   const p = (point.payload ?? {}) as Record<string, unknown>;
   const content = typeof p.content === 'string' ? p.content : '';
+  const startLine = typeof p.start_line === 'number' ? p.start_line : 1;
   return {
     id: point.id,
     file_path: p.file_path as string | undefined,
@@ -65,6 +67,10 @@ function payloadToResult(point: QdrantPoint): SearchResult {
     symbol_kind: (p.symbol_kind as string | null) ?? null,
     symbol_name: (p.symbol_name as string | null) ?? null,
     preview: content.slice(0, 500),
+    code_lines: content.split(/\r?\n/).map((text, idx) => ({
+      line: startLine + idx,
+      text,
+    })),
     score: point.score ?? null,
   };
 }

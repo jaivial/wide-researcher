@@ -10,6 +10,10 @@ interface SearchResult {
     symbol_kind?: string | null;
     symbol_name?: string | null;
     preview: string;
+    code_lines: Array<{
+        line: number;
+        text: string;
+    }>;
     score: number | null;
 }
 export interface FindOpts {

@@ -213,6 +213,9 @@ async function augmentWithReindexFlow(
       (result.model.provider === 'cohere'
         ? `  • Cohere API: ~$0.10 / 1M input tokens. A 5,000-file repo runs\n` +
           `    ~$2-5. Time: ~3-5 min (network-bound, batched at 96/req).\n`
+        : result.model.provider === 'local-gte-qwen2'
+        ? `  • GTE-Qwen2-1.5B: $0 (local CPU). Time: ~15-30 min on a 5,000-file repo.\n` +
+          `    RAM peak ~2.3 GB during indexing (one-file-per-subprocess, safe).\n`
         : `  • Local MiniLM: $0 (CPU-only). Time: ~5 min on a 5,000-file repo.\n`),
   );
 
