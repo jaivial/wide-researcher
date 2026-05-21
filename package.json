@@ -34,7 +34,9 @@
   "files": [
     "bin",
     "dist",
-    "python",
+    "python/**/*.py",
+    "python/README.md",
+    "python/requirements.txt",
     "templates",
     "LICENSE",
     "README.md"
