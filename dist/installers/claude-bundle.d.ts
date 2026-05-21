@@ -22,5 +22,14 @@ export interface UninstallBundleOptions {
     /** Project root. Defaults to cwd. */
     cwd?: string;
 }
+export interface McpFile {
+    mcpServers?: Record<string, McpServerEntry>;
+}
+export interface McpServerEntry {
+    command: string;
+    args: string[];
+    env?: Record<string, string>;
+}
+export declare function writeMcpStanza(id: ProjectIdentity, force: boolean): Promise<void>;
 export declare function installClaudeBundle(opts: InstallBundleOptions): Promise<ProjectIdentity>;
 export declare function uninstallClaudeBundle(opts?: UninstallBundleOptions): Promise<void>;

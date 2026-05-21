@@ -22,10 +22,10 @@ function asStringArray(value: unknown): string[] {
 
 function envConfig() {
   const cfg = loadProjectConfig();
-  const uri = process.env[cfg.neo4j.uriEnv];
-  const username = process.env[cfg.neo4j.userEnv];
-  const password = process.env[cfg.neo4j.passwordEnv];
-  const database = process.env[cfg.neo4j.databaseEnv];
+  const uri = process.env[cfg.neo4j.uriEnv] || cfg.neo4j.uri;
+  const username = process.env[cfg.neo4j.userEnv] || cfg.neo4j.user;
+  const password = process.env[cfg.neo4j.passwordEnv] || cfg.neo4j.password;
+  const database = process.env[cfg.neo4j.databaseEnv] || cfg.neo4j.database;
   const missing = [
     [cfg.neo4j.uriEnv, uri],
     [cfg.neo4j.userEnv, username],

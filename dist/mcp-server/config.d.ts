@@ -3,6 +3,10 @@ export interface Neo4jConfig {
     userEnv: string;
     passwordEnv: string;
     databaseEnv: string;
+    uri?: string;
+    user?: string;
+    password?: string;
+    database?: string;
 }
 export interface ProjectConfig {
     projectName: string;

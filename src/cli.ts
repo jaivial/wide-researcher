@@ -4,6 +4,7 @@ import { Command } from 'commander';
 
 import { runInit } from './commands/init.js';
 import { runAdd } from './commands/add.js';
+import { runNeo4jSetup } from './commands/neo4j-setup.js';
 import { runNeo4jSync } from './commands/neo4j-sync.js';
 import { runReindex } from './commands/reindex.js';
 import { runStatus } from './commands/status.js';
@@ -19,7 +20,7 @@ program
   .description(
     'Qdrant-backed semantic code-search, AST/symbol graph search, and impact-radius diagrams for Claude Code.',
   )
-  .version('0.1.0-alpha.24');
+  .version('0.1.0-alpha.25');
 
 function fail(e: unknown): never {
   log.error((e as Error).message);
@@ -174,6 +175,18 @@ program
     try {
       const maxFiles = opts.maxFiles ? parseInt(opts.maxFiles, 10) : undefined;
       await runNeo4jSync({ maxFiles: Number.isFinite(maxFiles) ? maxFiles : undefined });
+    } catch (e) {
+      fail(e);
+    }
+  });
+
+program
+  .command('neo4j-setup')
+  .description('Auto-detect, install, and configure Neo4j for graph backend. Sets up credentials in config.json and .mcp.json.')
+  .option('--non-interactive', 'Skip prompts; use existing config or fail')
+  .action(async (opts: { nonInteractive?: boolean }) => {
+    try {
+      await runNeo4jSetup({ nonInteractive: !!opts.nonInteractive });
     } catch (e) {
       fail(e);
     }

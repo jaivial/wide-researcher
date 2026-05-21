@@ -61,6 +61,10 @@ export function loadProjectConfig() {
             userEnv: String(neo4j.user_env ?? neo4j.userEnv ?? 'NEO4J_USERNAME'),
             passwordEnv: String(neo4j.password_env ?? neo4j.passwordEnv ?? 'NEO4J_PASSWORD'),
             databaseEnv: String(neo4j.database_env ?? neo4j.databaseEnv ?? 'NEO4J_DATABASE'),
+            uri: neo4j.uri ? String(neo4j.uri) : undefined,
+            user: neo4j.user ? String(neo4j.user) : undefined,
+            password: neo4j.password ? String(neo4j.password) : undefined,
+            database: neo4j.database ? String(neo4j.database) : undefined,
         },
         configPath: path,
     };

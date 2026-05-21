@@ -247,7 +247,7 @@ async function registerClaudeHook(id, hookScriptPath) {
     await fs.writeFile(settingsPath, JSON.stringify(doc, null, 2) + '\n', 'utf8');
     log.ok(`registered UserPromptSubmit hook in ${settingsPath}`);
 }
-async function writeMcpStanza(id, force) {
+export async function writeMcpStanza(id, force) {
     const mcpPath = projectMcpPath(id.projectRoot);
     let doc = {};
     if (await exists(mcpPath)) {
@@ -273,13 +273,44 @@ async function writeMcpStanza(id, force) {
     // Two equally valid resolutions: bundled bin (preferred if installed
     // globally / via npx) and a fall-back path for local development.
     const bundledBin = path.resolve(pyPackageRoot(), '..', 'bin', 'wide-researcher-mcp.js');
+    const env = {
+        // Python venv that hosts the embed worker model cache.
+        PYTHON_BIN: venvPython(),
+    };
+    try {
+        const { loadProjectConfig } = await import('../mcp-server/config.js');
+        const hadArg = process.argv.includes('--project-config');
+        if (!hadArg)
+            process.argv.push('--project-config', id.configPath);
+        let projectCfg;
+        try {
+            projectCfg = loadProjectConfig();
+        }
+        finally {
+            if (!hadArg)
+                process.argv.splice(process.argv.length - 2, 2);
+        }
+        if (projectCfg.graphProvider === 'neo4j') {
+            const uri = process.env[projectCfg.neo4j.uriEnv] || projectCfg.neo4j.uri;
+            const user = process.env[projectCfg.neo4j.userEnv] || projectCfg.neo4j.user;
+            const password = process.env[projectCfg.neo4j.passwordEnv] || projectCfg.neo4j.password;
+            const database = process.env[projectCfg.neo4j.databaseEnv] || projectCfg.neo4j.database;
+            if (uri && user && password) {
+                env.NEO4J_URI = uri;
+                env.NEO4J_USERNAME = user;
+                env.NEO4J_PASSWORD = password;
+                if (database)
+                    env.NEO4J_DATABASE = database;
+            }
+        }
+    }
+    catch {
+        // Config may not exist yet during first init.
+    }
     doc.mcpServers[MCP_SERVER_NAME] = {
         command: 'node',
         args: [bundledBin, '--project-config', id.configPath],
-        env: {
-            // Python venv that hosts the embed worker model cache.
-            PYTHON_BIN: venvPython(),
-        },
+        env,
     };
     await fs.writeFile(mcpPath, JSON.stringify(doc, null, 2) + '\n', 'utf8');
     log.ok(`updated ${mcpPath} → mcpServers.${MCP_SERVER_NAME}`);

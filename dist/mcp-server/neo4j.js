@@ -3,7 +3,13 @@ let driver = null;
 export function neo4jConfigError(cfg) {
     if (cfg.graphProvider !== 'neo4j')
         return null;
-    const missing = [cfg.neo4j.uriEnv, cfg.neo4j.userEnv, cfg.neo4j.passwordEnv].filter((name) => !process.env[name]);
+    const missing = [
+        cfg.neo4j.uriEnv,
+        cfg.neo4j.userEnv,
+        cfg.neo4j.passwordEnv,
+    ].filter((name) => !process.env[name] && !((name === cfg.neo4j.uriEnv && cfg.neo4j.uri) ||
+        (name === cfg.neo4j.userEnv && cfg.neo4j.user) ||
+        (name === cfg.neo4j.passwordEnv && cfg.neo4j.password)));
     if (missing.length)
         return `graph_provider=neo4j but missing env vars: ${missing.join(', ')}`;
     return null;
@@ -16,12 +22,12 @@ function getDriver(cfg) {
     if (err)
         throw new Error(err);
     if (!driver) {
-        driver = neo4j.driver(process.env[cfg.neo4j.uriEnv] ?? '', neo4j.auth.basic(process.env[cfg.neo4j.userEnv] ?? '', process.env[cfg.neo4j.passwordEnv] ?? ''));
+        driver = neo4j.driver(process.env[cfg.neo4j.uriEnv] || cfg.neo4j.uri || '', neo4j.auth.basic(process.env[cfg.neo4j.userEnv] || cfg.neo4j.user || '', process.env[cfg.neo4j.passwordEnv] || cfg.neo4j.password || ''));
     }
     return driver;
 }
 export async function withNeo4jSession(cfg, fn) {
-    const database = process.env[cfg.neo4j.databaseEnv];
+    const database = process.env[cfg.neo4j.databaseEnv] || cfg.neo4j.database;
     const session = getDriver(cfg).session(database ? { database } : undefined);
     try {
         return await fn(session);

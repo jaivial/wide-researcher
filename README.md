@@ -226,13 +226,43 @@ Use it before multi-file changes. Use `wr_callers`, `wr_importers`, `wr_symbol_f
 
 ### Optional Neo4j graph backend
 
-Qdrant remains the default graph provider. If you want exact graph traversal in Neo4j, set `graph_provider` to `neo4j`, provide `NEO4J_URI`, `NEO4J_USERNAME`, and `NEO4J_PASSWORD`, then run:
+Qdrant remains the default graph provider. If you want exact graph traversal in Neo4j, use auto-setup:
+
+```bash
+wide-researcher neo4j-setup
+```
+
+This command verifies Neo4j availability, validates Bolt connectivity, stores credentials in project config, regenerates the MCP stanza with Neo4j env vars, and runs an initial sync.
+
+You can also configure credentials directly in `.wide-researcher/config.json`:
+
+```json
+{
+  "graph_provider": "neo4j",
+  "neo4j": {
+    "uri_env": "NEO4J_URI",
+    "user_env": "NEO4J_USERNAME",
+    "password_env": "NEO4J_PASSWORD",
+    "database_env": "NEO4J_DATABASE",
+    "uri": "bolt://127.0.0.1:7687",
+    "user": "neo4j",
+    "password": "your-password",
+    "database": "neo4j"
+  }
+}
+```
+
+Precedence is: environment variable > direct config.json credential field.
+
+When Neo4j is configured, running `wide-researcher init` / `wide-researcher add` re-generates `.mcp.json` and injects `NEO4J_URI`, `NEO4J_USERNAME`, `NEO4J_PASSWORD`, and `NEO4J_DATABASE` automatically.
+
+To sync graph payloads manually at any time, run:
 
 ```bash
 wide-researcher neo4j-sync
 ```
 
-If Neo4j is not configured, graph tools keep using Qdrant and the Neo4j sync command exits with a clear disabled-state message.
+If Neo4j is not configured, graph tools keep using Qdrant and the Neo4j sync command exits with a clear disabled-state message. For graph visualization, see Neo4j Browser/Bloom examples in the Neo4j Graph Visualization section below.
 
 ### Memory management
 
