@@ -17,9 +17,9 @@ const program = new Command();
 program
   .name('wide-researcher')
   .description(
-    'Qdrant-backed semantic code-search + impact-radius diagrams for Claude Code.',
+    'Qdrant-backed semantic code-search, AST/symbol graph search, and impact-radius diagrams for Claude Code.',
   )
-  .version('0.1.0-alpha.0');
+  .version('0.1.0-alpha.24');
 
 function fail(e: unknown): never {
   log.error((e as Error).message);
