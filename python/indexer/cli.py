@@ -23,7 +23,9 @@ from .metadata import derive_metadata
 from .embed import embed_batch, embed_query, get_model, teardown_provider
 from .config import CHUNK_CAP, MAX_RSS_MB
 from .db import (
+    build_chunk_payload,
     compute_file_hash,
+    extract_symbol_payloads,
     get_indexed_files,
     upsert_file,
     delete_stale,
@@ -73,6 +75,7 @@ def _process_file(
 
     t0 = time.time()
     chunks = chunk_file(abs_path, language, text)
+    _, symbol_payloads = extract_symbol_payloads(repo, abs_path, file_hash, language, text, chunks)
     del text  # free source text
 
     if not chunks:
@@ -141,22 +144,7 @@ def _process_file(
         from .db import _point_id
         points = []
         for ch, vec, meta in zip(batch_chunks, batch_embeds, batch_metas):
-            payload = {
-                "repo": repo,
-                "file_path": abs_path,
-                "file_hash": file_hash,
-                "chunk_index": ch.chunk_index,
-                "start_line": ch.start_line,
-                "end_line": ch.end_line,
-                "language": language,
-                "symbol_kind": ch.symbol_kind,
-                "symbol_name": ch.symbol_name,
-                "content": ch.content,
-                "content_tokens": ch.content_tokens,
-            }
-            for k in ("role", "atomic_layer", "is_test", "is_story", "route_owner"):
-                if k in meta:
-                    payload[k] = meta[k]
+            payload = build_chunk_payload(repo, abs_path, file_hash, language, ch, meta, symbol_payloads)
             points.append(
                 PointStruct(
                     id=_point_id(abs_path, ch.chunk_index),

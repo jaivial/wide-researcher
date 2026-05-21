@@ -6,6 +6,7 @@
 // unless the JS side called `close()`.
 
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import readline from 'node:readline';
 
 interface PendingRequest {
@@ -19,12 +20,22 @@ export interface EmbedWorkerOptions {
   /** Forwarded to the worker as WIDE_RESEARCHER_PROJECT_CONFIG so the
    *  worker pulls the same embed-model path the indexer is using. */
   projectConfigPath: string;
+  embedProvider: string;
+  embedModel: string;
+  embedDim: number;
+  secretsPath: string | null;
+  cohereApiKeyField: string;
 }
 
 export class EmbedWorker {
   private readonly pythonPath: string;
   private readonly scriptPath: string;
   private readonly projectConfigPath: string;
+  private readonly embedProvider: string;
+  private readonly embedModel: string;
+  private readonly embedDim: number;
+  private readonly secretsPath: string | null;
+  private readonly cohereApiKeyField: string;
   private queue: PendingRequest[] = [];
   private ready = false;
   private closed = false;
@@ -35,11 +46,29 @@ export class EmbedWorker {
     this.pythonPath = opts.pythonPath;
     this.scriptPath = opts.scriptPath;
     this.projectConfigPath = opts.projectConfigPath;
+    this.embedProvider = opts.embedProvider;
+    this.embedModel = opts.embedModel;
+    this.embedDim = opts.embedDim;
+    this.secretsPath = opts.secretsPath;
+    this.cohereApiKeyField = opts.cohereApiKeyField;
     this._start();
+  }
+
+  private _loadCohereApiKey(): string | null {
+    if (this.embedProvider !== 'cohere' || !this.secretsPath) return null;
+    try {
+      const raw = readFileSync(this.secretsPath, 'utf8');
+      const json = JSON.parse(raw) as Record<string, unknown>;
+      const key = json[this.cohereApiKeyField];
+      return typeof key === 'string' && key.length >= 20 ? key : null;
+    } catch {
+      return null;
+    }
   }
 
   private _start(): void {
     if (this.closed) return;
+    const cohereApiKey = this._loadCohereApiKey();
     this.proc = spawn(this.pythonPath, ['-u', this.scriptPath], {
       stdio: ['pipe', 'pipe', 'pipe'],
       env: {
@@ -48,6 +77,9 @@ export class EmbedWorker {
         PYTHONUNBUFFERED: '1',
         OMP_NUM_THREADS: '2',
         ORT_NUM_THREADS: '2',
+        ...(cohereApiKey ? { COHERE_API_KEY: cohereApiKey } : {}),
+        COHERE_EMBED_MODEL: this.embedModel,
+        COHERE_EMBED_DIM: String(this.embedDim),
       },
     }) as ChildProcessWithoutNullStreams;
 

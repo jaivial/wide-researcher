@@ -1,8 +1,206 @@
 # wide-researcher MCP tools — full reference
 
+## Collections
+
+- Code chunks live in the configured Qdrant collection, for example `kraken_code`.
+- AST/symbol nodes live in `${collection}_symbols`, for example `kraken_code_symbols`.
+- `wr_arch_impact` combines both collections plus structural payload edges.
+
+---
+
+## `wr_arch_impact(description, k?)`
+
+Hybrid architecture impact analysis. **Entry point for "what does this change affect" reasoning.**
+
+### Signature
+
+```ts
+wr_arch_impact(args: {
+  description: string;    // required — natural language
+  k?: number;             // default 15, max files returned
+}): Promise<ArchImpactFile[]>
+```
+
+### Algorithm
+
+1. Run semantic/keyword hybrid search over code chunks.
+2. Run symbol-node search over the symbol collection.
+3. Extract seed files and symbols from both result sets.
+4. Expand with structural edges:
+   - callers: chunks where `calls` / `references` mention seed symbols
+   - importers: chunks where `imports` / `imported_files` mention seed files/modules
+   - exports: chunks where `exports` mention seed symbols
+   - type users: chunks where `type_refs` / `base_types` / `implements` mention seed types
+5. Merge and rank by semantic score, symbol-node score, structural edge weight, and derivative penalties.
+
+### Returns
+
+```ts
+{
+  file_path: string,
+  language: string | null,
+  role: string | null,
+  score: number,
+  reasons: string[],
+  top_symbols: string[],
+  edges: string[],
+  source: 'semantic' | 'symbol' | 'caller' | 'importer' | 'type_relation' | 'export',
+}[]
+```
+
+### Examples
+
+```ts
+// Scope a feature or bug fix
+wr_arch_impact({ description: "workspace switch during article generation leaks articles", k: 20 })
+
+// Find downstream blast radius
+wr_arch_impact({ description: "change validateSession behavior", k: 25 })
+```
+
+---
+
+## `wr_symbol_find(query, k?, kind?, lang?)`
+
+Search AST/symbol nodes directly. Use for declarations, functions, classes, interfaces, React components, methods, and C# types.
+
+### Signature
+
+```ts
+wr_symbol_find(args: {
+  query: string;      // required
+  k?: number;         // default 10
+  kind?: string;      // function / class / interface / type / enum / method / const
+  lang?: string;      // typescript / tsx / csharp
+}): Promise<SymbolSearchResult[]>
+```
+
+### Returns
+
+```ts
+{
+  node_id: string,
+  kind: string,
+  name: string,
+  fqn: string | null,
+  file_path: string,
+  start_line: number,
+  end_line: number,
+  language: string,
+  signature: string,
+  calls: string[],
+  imports: string[],
+  exports: string[],
+  score: number | null,
+}[]
+```
+
+### Examples
+
+```ts
+// Find a function or component declaration
+wr_symbol_find({ query: "validateSession", kind: "function" })
+
+// Find C# methods
+wr_symbol_find({ query: "GenerateViewerImageAsync", lang: "csharp", kind: "method" })
+
+// Find React-ish symbols
+wr_symbol_find({ query: "Workspace combobox", lang: "tsx" })
+```
+
+---
+
+## `wr_callers(symbol, k?)`
+
+Find chunks/files that call or reference a symbol. Use for "what calls X" and blast-radius checks.
+
+### Signature
+
+```ts
+wr_callers(args: {
+  symbol: string;   // required — exact or compact symbol name
+  k?: number;       // default 20
+}): Promise<SearchResult[]>
+```
+
+### Example
+
+```ts
+wr_callers({ symbol: "validateSession", k: 25 })
+```
+
+---
+
+## `wr_callees(symbolOrFile, k?)`
+
+Return calls made by matching chunks for a symbol name or file path.
+
+### Signature
+
+```ts
+wr_callees(args: {
+  symbolOrFile: string;  // symbol name or absolute file path
+  k?: number;            // default 20
+}): Promise<{ calls: string[]; chunks: SearchResult[] }>
+```
+
+### Example
+
+```ts
+wr_callees({ symbolOrFile: "/var/www/kraken/Dashboard/src/api/endpoints.ts" })
+```
+
+---
+
+## `wr_importers(pathOrModule, k?)`
+
+Find files that import a module string or resolved file path.
+
+### Signature
+
+```ts
+wr_importers(args: {
+  pathOrModule: string;  // import source, module name, or absolute file path
+  k?: number;            // default 20
+}): Promise<SearchResult[]>
+```
+
+### Examples
+
+```ts
+// Absolute file path
+wr_importers({ pathOrModule: "/var/www/kraken/Dashboard/src/api/endpoints.ts" })
+
+// Module specifier
+wr_importers({ pathOrModule: "@/api/endpoints" })
+```
+
+---
+
+## `wr_exports(path, k?)`
+
+List exports declared by one file and return chunks carrying export payloads.
+
+### Signature
+
+```ts
+wr_exports(args: {
+  path: string;  // absolute file path
+  k?: number;    // default 20
+}): Promise<{ exports: string[]; chunks: SearchResult[] }>
+```
+
+### Example
+
+```ts
+wr_exports({ path: "/var/www/kraken/Dashboard/src/api/endpoints.ts" })
+```
+
+---
+
 ## `wr_find(query, k?, lang?, role?, layer?, mode?)`
 
-Unified codebase search. Three modes, one tool.
+Unified code chunk search. Three modes, one tool. Use after `wr_arch_impact` when you need chunk-level follow-up.
 
 ### Signature
 
@@ -21,9 +219,9 @@ wr_find(args: {
 
 | Mode | When |
 |---|---|
-| `semantic` | Concept queries. "the login flow", "how we cap rate limits". Vector similarity, MiniLM-L6 cosine. |
-| `keyword` | Literal identifiers. "useEffect", "QdrantClient", "ARTICLE_BATCH_TIMEOUT". Full-text payload match. |
-| `hybrid` | **Default.** Qdrant native RRF fusion of both. Picks up both kinds of hit in one round-trip. |
+| `semantic` | Concept queries: "the login flow", "how we cap rate limits". |
+| `keyword` | Literal identifiers: "useEffect", "QdrantClient", "ARTICLE_BATCH_TIMEOUT". |
+| `hybrid` | **Default.** Qdrant native RRF fusion of both. |
 
 ### Returns
 
@@ -40,7 +238,7 @@ Each result is a chunk-level hit:
   atomic_layer: string | null,
   symbol_kind: string | null,
   symbol_name: string | null,
-  preview: string,        // first 500 chars of content
+  preview: string,
   score: number | null,
 }
 ```
@@ -65,9 +263,7 @@ wr_find({ query: "rate limit middleware", k: 20 })
 
 ## `wr_file(path)`
 
-Fetch every indexed chunk of one file, ordered by `chunk_index`.
-Use after `wr_find` / `wr_impact` to read the full structured
-content.
+Fetch every indexed chunk of one file, ordered by `chunk_index`. Use after search/impact tools to read full structured content.
 
 ### Signature
 
@@ -75,12 +271,11 @@ content.
 wr_file(args: { path: string }): Promise<FileChunk[]>
 ```
 
-`path` is the absolute path as stored in the index (the same string
-that appears in `wr_find` results).
+`path` is the absolute path as stored in the index.
 
 ### Returns
 
-Each chunk has full content (not preview):
+Each chunk has full content:
 
 ```ts
 {
@@ -88,11 +283,11 @@ Each chunk has full content (not preview):
   chunk_index: number,
   start_line: number,
   end_line: number,
-  symbol_kind: string | null,    // function / class / interface / type / imports / block / …
+  symbol_kind: string | null,
   symbol_name: string | null,
   language: string,
   role: string | null,
-  content: string,               // full text, no truncation
+  content: string,
 }
 ```
 
@@ -100,43 +295,15 @@ Each chunk has full content (not preview):
 
 ## `wr_impact(description, k?)`
 
-File-grouped impact analysis. **The entry point for "what does this
-change affect" reasoning.**
+Legacy file-grouped semantic impact analysis. Prefer `wr_arch_impact` when available.
 
 ### Signature
 
 ```ts
 wr_impact(args: {
-  description: string;    // required — natural language
-  k?: number;             // default 15, max files returned
+  description: string;
+  k?: number;
 }): Promise<ImpactFile[]>
-```
-
-### Algorithm
-
-1. Hybrid search over a pool of **80 chunks** for the description.
-2. Group hits by `file_path`.
-3. Weight each chunk's score:
-   - typescript / tsx / python / go / rust / csharp / java → 1.0
-   - css → 0.5
-   - text → 0.6
-   - markdown → 0.3
-   - json (non-locales) → 0.2
-   - **derivative penalties**: `.stories.tsx` → 0.3, `.spec/.test`
-     → 0.5, anything under `/locales/` → 0.2
-4. Sum into `total_score`, sort descending, take top-`k`.
-
-### Returns
-
-```ts
-{
-  file_path: string,
-  language: string,
-  role: string | null,
-  total_score: number,
-  chunk_count_in_results: number,
-  top_symbols: string[],     // up to 3 distinct symbol names
-}[]
 ```
 
 ---
@@ -152,8 +319,8 @@ Sanity check. No args.
   collection: string,
   status: 'green' | 'yellow' | 'red',
   points_count: number,
-  vector_size: number,       // 384 for MiniLM-L6
-  distance: 'Cosine' | …,
+  vector_size: number,
+  distance: 'Cosine' | string,
 }
 ```
 

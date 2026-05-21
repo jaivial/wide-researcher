@@ -44,7 +44,9 @@ test agents) ingest. The HTML is what humans open in a browser.
     "diagramPath": "/abs/.../impact-diagram.html",
     "topK": 20,
     "semanticHits": 60,
-    "keywordHits": 24
+    "keywordHits": 24,
+    "symbolHits": 12,
+    "structuralEdges": 18
   }
 }
 ```
@@ -67,8 +69,10 @@ browser with network access.
   - Origin → file: edge thickness scales with ring (origin0 thickest).
   - File ↔ file: `proximity` (dashed) for nearest-ring neighbours,
     `neighbor` (light blue) for spatial overlap, `symbol` (green)
-    for shared symbol names, `owner`/`role` (amber dashed) for
-    shared role, `dir` (grey dotted) for same directory.
+    for shared symbol names, `caller`, `importer`, `export`, and
+    `type_relation` for AST/symbol graph evidence, `owner`/`role`
+    (amber dashed) for shared role, `dir` (grey dotted) for same
+    directory.
 
 ### How agents use it
 

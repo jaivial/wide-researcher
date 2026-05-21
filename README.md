@@ -1,21 +1,21 @@
 # wide-researcher
 
-[![npm version](https://img.shields.io/badge/npm-v0.1.0--alpha.7-blue.svg)](https://www.npmjs.com/package/wide-researcher)
+[![npm version](https://img.shields.io/badge/npm-v0.1.0--alpha.24-blue.svg)](https://www.npmjs.com/package/wide-researcher)
 [![license](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![node](https://img.shields.io/badge/node-%3E%3D20-brightgreen.svg)](#requirements)
 [![python](https://img.shields.io/badge/python-%3E%3D3.11-yellow.svg)](#requirements)
 
-> Drop a local Qdrant-backed semantic code index into any project,
-> and Claude Code gets four new MCP tools — `wr_find`, `wr_file`,
-> `wr_impact`, `wr_index_status` — for finding files by **meaning**
-> instead of by literal regex.
+> Drop a local Qdrant-backed semantic code index plus AST/symbol graph
+> index into any project. Claude Code gets MCP tools for semantic search,
+> symbol search, callers, callees, importers, exports, hybrid impact,
+> and full-file drill-down.
 >
 > Plus an **impact-radius diagram** that ranks every file a task is
-> likely to touch, grouped by ring, rendered as a standalone HTML
-> page.
+> likely to touch, grouped by semantic and structural evidence, rendered
+> as a standalone HTML page.
 >
 > One command sets it up. Indexes update automatically on save.
-> Everything runs locally. No telemetry.
+> Everything runs locally except optional cloud embedding providers. No telemetry.
 
 ---
 
@@ -39,6 +39,7 @@ That single command:
 5. Registers a `systemd --user` unit (Linux) or `launchd` plist (macOS) so Qdrant + the file watcher survive reboots.
 6. Drops a project-scoped Claude Code agent + skill into `<project>/.claude/`, plus the binding hook that injects `<MCP-MANDATORY-FOR-CODE-SEARCH>` on every prompt.
 7. Runs the initial full-codebase index. Time scales with codebase size — a 5 000-file repo takes ~5 min on MiniLM, ~3 min on Cohere (network-bound, batched).
+8. Adds AST/symbol payload fields to indexed TS/TSX/C# chunks and can build a separate `<collection>_symbols` Qdrant collection for symbol-node search.
 
 After `init`, **edit any file and the index updates automatically.**
 
@@ -88,21 +89,28 @@ Switching between models that share the same vector dimensionality (e.g. GTE-Qwe
 
 ## What you get inside Claude Code
 
-Four MCP tools become available the moment Claude opens the project:
+MCP tools become available the moment Claude opens the project:
 
 | Tool | What it does |
 |---|---|
+| `wr_arch_impact(description, k?)` | Hybrid semantic + AST/symbol graph impact analysis. **Use first for "what does this change affect".** |
+| `wr_symbol_find(query, k?, kind?, lang?)` | Symbol-node search for functions, classes, interfaces, React components, C# methods/types. |
+| `wr_callers(symbol, k?)` | Files/chunks that call or reference a symbol. |
+| `wr_callees(symbolOrFile, k?)` | Calls made by a matching symbol or file. |
+| `wr_importers(pathOrModule, k?)` | Files importing a path or module. |
+| `wr_exports(path, k?)` | Exports declared by one file. |
 | `wr_find(query, mode?, lang?, role?, layer?)` | Chunk-level semantic / keyword / hybrid search. Hybrid mode = Qdrant native RRF fusion. |
 | `wr_file(path)` | All chunks for one file, ordered. Full content, not preview. |
-| `wr_impact(description, k?)` | File-grouped impact analysis. Weighted scoring, top-3 symbol names per file. **The go-to tool for "what does this change affect" reasoning.** |
+| `wr_impact(description, k?)` | Legacy semantic file-grouped impact analysis. |
 | `wr_index_status` | Collection health (green/yellow/red) + counts. |
 
-Plus a project-scoped **agent** (`.claude/agents/wide-researcher.md`) that wraps the tools into a 4-step workflow:
+Plus a project-scoped **agent** (`.claude/agents/wide-researcher.md`) that wraps the tools into a graph-aware workflow:
 
-1. `wr_impact` for the file-level ring grouping
-2. `wr_file` for drill-down into specific files
-3. `wr_find` for concept lookups
-4. Synthesise a structured ring-grouped report
+1. `wr_arch_impact` for file-level impact with semantic + structural evidence
+2. `wr_symbol_find`, `wr_callers`, `wr_importers`, `wr_exports` for exact graph drill-downs
+3. `wr_file` for full indexed file content
+4. `wr_find` for chunk-level concept lookups
+5. Synthesise a structured ring-grouped report
 
 ---
 
@@ -116,6 +124,10 @@ wide-researcher reindex --force      full rebuild
 wide-researcher status               qdrant + indexer + last-index time
 wide-researcher status --json        machine-readable
 wide-researcher search "<query>"     terminal-side smoke search
+wide-researcher symbol-index         payload-only AST/symbol update for TS/TSX/C# chunks
+wide-researcher symbol-index --with-node-embeddings
+                                      also build/update <collection>_symbols
+wide-researcher neo4j-sync           optional sync from Qdrant symbol payloads to Neo4j
 wide-researcher uninstall            remove from this project
 wide-researcher uninstall --all      also nuke ~/.wide-researcher/
 ```
@@ -143,8 +155,9 @@ logs        /home/u/.wide-researcher/logs/indexer-myapp_a1b2c3d4.log
         ┌────────────────────────────────────────────────────┐
         │  Claude Code (in your project, MCP-aware)          │
         └─────────────────┬──────────────────────────────────┘
-                          │ MCP tool call: wr_find / wr_file /
-                          │ wr_impact / wr_index_status
+                          │ MCP tool call: wr_arch_impact /
+                          │ wr_symbol_find / wr_callers /
+                          │ wr_find / wr_file / wr_index_status
                           ▼
         ┌────────────────────────────────────────────────────┐
         │  wide-researcher-mcp (Node, stdio transport)       │
@@ -167,8 +180,15 @@ logs        /home/u/.wide-researcher/logs/indexer-myapp_a1b2c3d4.log
                      ▼
             ┌─────────────────┐
             │ per-project     │
-            │ collection      │
+            │ code collection │
             │ <name>_<sha1>   │
+            └────────┬────────┘
+                     │ AST/symbol payload enrichment
+                     ▼
+            ┌─────────────────┐
+            │ symbol-node     │
+            │ collection      │
+            │ <name>_symbols  │
             └─────────────────┘
 
         ┌────────────────────────────────────────────────────┐
@@ -181,6 +201,38 @@ logs        /home/u/.wide-researcher/logs/indexer-myapp_a1b2c3d4.log
                           ▼
                   (same collection above)
 ```
+
+### AST/symbol graph indexing
+
+For TypeScript, TSX, and C# projects, `wide-researcher symbol-index` adds structural payloads to existing code chunks without re-embedding the code collection:
+
+- declarations: functions, classes, interfaces, types, enums, methods, components
+- imports and resolved relative imported files
+- exports and re-exports
+- calls and references
+- type refs, base types, and interface implementations
+
+`wide-researcher symbol-index --with-node-embeddings` also creates or updates a second Qdrant collection named `<collection>_symbols`. Those symbol nodes use the same configured embed provider, model, and vector dimension as the code collection. Existing code vectors are not rebuilt.
+
+### Hybrid architecture impact
+
+`wr_arch_impact` combines:
+
+- semantic/keyword hits from the code collection
+- symbol-node hits from `<collection>_symbols`
+- structural expansion through callers, importers, exports, and type users
+
+Use it before multi-file changes. Use `wr_callers`, `wr_importers`, `wr_symbol_find`, and `wr_exports` for exact structural questions.
+
+### Optional Neo4j graph backend
+
+Qdrant remains the default graph provider. If you want exact graph traversal in Neo4j, set `graph_provider` to `neo4j`, provide `NEO4J_URI`, `NEO4J_USERNAME`, and `NEO4J_PASSWORD`, then run:
+
+```bash
+wide-researcher neo4j-sync
+```
+
+If Neo4j is not configured, graph tools keep using Qdrant and the Neo4j sync command exits with a clear disabled-state message.
 
 ### Memory management
 
@@ -275,7 +327,7 @@ For full details, see [docs/PRIVACY.md](docs/PRIVACY.md).
 
 ## Status & roadmap
 
-**v0.1.0-alpha.7 — functionally complete.** A fresh machine can `npx wide-researcher init` today and end up with a fully working Claude Code integration.
+**v0.1.0-alpha.24 — semantic + AST/symbol graph search.** A fresh machine can `npx wide-researcher init` today and end up with a working Claude Code integration. Existing projects can add graph payloads with `wide-researcher symbol-index` without rebuilding code vectors.
 
 | Phase | What | Done |
 |---|---|---|
@@ -287,8 +339,11 @@ For full details, see [docs/PRIVACY.md](docs/PRIVACY.md).
 | 6 | MCP server (wr_find / wr_file / wr_impact) | ✅ |
 | 7 | Claude bundle (agent + skill + .mcp.json) | ✅ |
 | 8 | CLI surface (init / add / reindex / status / search / uninstall) | ✅ |
-| 9 | Docs polish | ✅ |
-| 10 | CI workflow + first tagged release | pending |
+| 9 | AST/symbol payload indexing for TS/TSX/C# | ✅ |
+| 10 | Symbol-node Qdrant collection + `wr_symbol_find` | ✅ |
+| 11 | Hybrid architecture impact + structural MCP tools | ✅ |
+| 12 | Optional Neo4j sync/backend | ✅ |
+| 13 | CI workflow + stable tagged release | pending |
 
 ### After v0.1
 
@@ -296,6 +351,7 @@ For full details, see [docs/PRIVACY.md](docs/PRIVACY.md).
 - Windows native process supervision
 - Web UI for the impact diagram history
 - Incremental model download (stream model weights instead of full download)
+- LSP-backed exact type resolution beyond tree-sitter structural extraction
 
 ---
 

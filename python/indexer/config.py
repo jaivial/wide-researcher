@@ -100,6 +100,14 @@ MAX_FILE_BYTES: int = int(_cfg.get("max_file_bytes", 50 * 1024 * 1024))
 SECRETS_PATH: str = str(_cfg.get("secrets_path", ""))
 COHERE_API_KEY_FIELD: str = str(_cfg.get("cohere_api_key_field", "cohere_api_key"))
 
+# Optional exact graph backend. Qdrant remains the default.
+GRAPH_PROVIDER: str = str(_cfg.get("graph_provider", "qdrant"))
+_NEO4J_CFG = _cfg.get("neo4j", {}) if isinstance(_cfg.get("neo4j", {}), dict) else {}
+NEO4J_URI_ENV: str = str(_NEO4J_CFG.get("uri_env", "NEO4J_URI"))
+NEO4J_USER_ENV: str = str(_NEO4J_CFG.get("user_env", "NEO4J_USERNAME"))
+NEO4J_PASSWORD_ENV: str = str(_NEO4J_CFG.get("password_env", "NEO4J_PASSWORD"))
+NEO4J_DATABASE_ENV: str = str(_NEO4J_CFG.get("database_env", "NEO4J_DATABASE"))
+
 
 def _load_cohere_key() -> str:
     """Read the Cohere API key from the secrets file at runtime. Never log it."""

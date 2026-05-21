@@ -50,8 +50,8 @@ def _embed_one(text: str) -> list[float]:
 
     payload = {
         "model": COHERE_MODEL,
-        "inputType": "search_query",
-        "embeddingTypes": ["float"],
+        "input_type": "search_query",
+        "embedding_types": ["float"],
         "texts": [text[:4096]],
     }
     headers = {
@@ -99,8 +99,8 @@ def _embed_batch(texts: list[str]) -> list[list[float]]:
         chunk = [t[:4096] for t in texts[i:i + chunk_size]]
         payload = {
             "model": COHERE_MODEL,
-            "inputType": "search_document",
-            "embeddingTypes": ["float"],
+            "input_type": "search_document",
+            "embedding_types": ["float"],
             "texts": chunk,
         }
         headers = {

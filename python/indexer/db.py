@@ -12,7 +12,7 @@ import json
 import logging
 import os
 import uuid
-from typing import Sequence
+from typing import Any, Sequence
 
 from qdrant_client import QdrantClient
 from qdrant_client.http.models import (
@@ -27,6 +27,8 @@ from .config import (
     QDRANT_COLLECTION,
     FILE_INDEX_PATH,
 )
+from .symbol_extractor import extract_file_graph
+from .symbol_types import FileGraphRecord
 
 log = logging.getLogger(__name__)
 
@@ -80,6 +82,57 @@ def _point_id(file_path: str, chunk_index: int) -> str:
     )
 
 
+# ── Payload helpers ──────────────────────────────────────────────────────────
+
+
+def extract_symbol_payloads(
+    repo: str,
+    file_path: str,
+    file_hash: str,
+    language: str,
+    source: str,
+    chunks: Sequence,
+) -> tuple[FileGraphRecord, dict[int, dict[str, Any]]]:
+    graph = extract_file_graph(repo, file_path, file_hash, language, source)
+    if language not in ("typescript", "tsx", "csharp"):
+        return graph, {}
+    payloads = {
+        ch.chunk_index: graph.payload_for_range(ch.start_line, ch.end_line)
+        for ch in chunks
+    }
+    return graph, payloads
+
+
+def build_chunk_payload(
+    repo: str,
+    file_path: str,
+    file_hash: str,
+    language: str,
+    ch,
+    meta: dict[str, Any],
+    symbol_payloads: dict[int, dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    payload = {
+        "repo": repo,
+        "file_path": file_path,
+        "file_hash": file_hash,
+        "chunk_index": ch.chunk_index,
+        "start_line": ch.start_line,
+        "end_line": ch.end_line,
+        "language": language,
+        "symbol_kind": ch.symbol_kind,
+        "symbol_name": ch.symbol_name,
+        "content": ch.content,
+        "content_tokens": ch.content_tokens,
+    }
+    for k in ("role", "atomic_layer", "is_test", "is_story", "route_owner"):
+        if k in meta:
+            payload[k] = meta[k]
+    if symbol_payloads is not None:
+        payload.update(symbol_payloads.get(ch.chunk_index, {}))
+    return payload
+
+
 # ── Upsert + stale-delete ────────────────────────────────────────────────────
 
 
@@ -92,6 +145,7 @@ def upsert_file(
     embeddings: Sequence,
     metadatas: Sequence,
     language: str,
+    symbol_payloads: dict[int, dict[str, Any]] | None = None,
 ) -> int:
     """Replace all points for `file_path` with the new chunk set."""
     client = get_client()
@@ -107,22 +161,7 @@ def upsert_file(
     if chunk_count:
         points = []
         for ch, vec, meta in zip(chunks, embeddings, metadatas):
-            payload = {
-                "repo": repo,
-                "file_path": file_path,
-                "file_hash": file_hash,
-                "chunk_index": ch.chunk_index,
-                "start_line": ch.start_line,
-                "end_line": ch.end_line,
-                "language": language,
-                "symbol_kind": ch.symbol_kind,
-                "symbol_name": ch.symbol_name,
-                "content": ch.content,
-                "content_tokens": ch.content_tokens,
-            }
-            for k in ("role", "atomic_layer", "is_test", "is_story", "route_owner"):
-                if k in meta:
-                    payload[k] = meta[k]
+            payload = build_chunk_payload(repo, file_path, file_hash, language, ch, meta, symbol_payloads)
             points.append(
                 PointStruct(
                     id=_point_id(file_path, ch.chunk_index),

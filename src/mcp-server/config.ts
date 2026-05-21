@@ -8,12 +8,25 @@
 
 import { readFileSync } from 'node:fs';
 
+export interface Neo4jConfig {
+  uriEnv: string;
+  userEnv: string;
+  passwordEnv: string;
+  databaseEnv: string;
+}
+
 export interface ProjectConfig {
   projectName: string;
   projectRoot: string;
   collectionName: string;
   qdrantUrl: string;
+  embedProvider: string;
   embedModel: string; // path or HF id
+  embedDim: number;
+  secretsPath: string | null;
+  cohereApiKeyField: string;
+  graphProvider: string;
+  neo4j: Neo4jConfig;
   configPath: string; // absolute path the JSON was loaded from
 }
 
@@ -55,11 +68,13 @@ export function loadProjectConfig(): ProjectConfig {
       `project config ${path} missing required keys: project_root + collection_name`,
     );
   }
+  const neo4j = (json.neo4j ?? {}) as Record<string, unknown>;
   return {
     projectName: String(json.project_name ?? json.projectName ?? 'project'),
     projectRoot: project_root,
     collectionName: collection_name,
     qdrantUrl: String(json.qdrant_url ?? json.qdrantUrl ?? 'http://127.0.0.1:6333'),
+    embedProvider: String(json.embed_provider ?? json.embedProvider ?? 'local-minilm'),
     embedModel: String(
       json.model_path ??
         json.modelPath ??
@@ -67,6 +82,19 @@ export function loadProjectConfig(): ProjectConfig {
         json.embedModel ??
         'sentence-transformers/all-MiniLM-L6-v2',
     ),
+    embedDim: Number(json.embed_dim ?? json.embedDim ?? 384),
+    secretsPath:
+      json.secrets_path || json.secretsPath ? String(json.secrets_path ?? json.secretsPath) : null,
+    cohereApiKeyField: String(
+      json.cohere_api_key_field ?? json.cohereApiKeyField ?? 'cohere_api_key',
+    ),
+    graphProvider: String(json.graph_provider ?? json.graphProvider ?? 'qdrant'),
+    neo4j: {
+      uriEnv: String(neo4j.uri_env ?? neo4j.uriEnv ?? 'NEO4J_URI'),
+      userEnv: String(neo4j.user_env ?? neo4j.userEnv ?? 'NEO4J_USERNAME'),
+      passwordEnv: String(neo4j.password_env ?? neo4j.passwordEnv ?? 'NEO4J_PASSWORD'),
+      databaseEnv: String(neo4j.database_env ?? neo4j.databaseEnv ?? 'NEO4J_DATABASE'),
+    },
     configPath: path,
   };
 }

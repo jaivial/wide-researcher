@@ -15,7 +15,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { CallToolRequestSchema, ListToolsRequestSchema, } from '@modelcontextprotocol/sdk/types.js';
 import { loadProjectConfig } from './config.js';
 import { EmbedWorker } from './embed.js';
-import { wrFind, wrFile, wrImpact, wrIndexStatus } from './tools.js';
+import { wrArchImpact, wrCallers, wrCallees, wrExports, wrFind, wrFile, wrImpact, wrImporters, wrIndexStatus, wrSymbolFind, } from './tools.js';
 import { pyPackageRoot, venvPython } from '../utils/paths.js';
 import path from 'node:path';
 const cfg = loadProjectConfig();
@@ -23,6 +23,11 @@ const embedWorker = new EmbedWorker({
     pythonPath: venvPython(),
     scriptPath: path.join(pyPackageRoot(), 'scripts', 'embed_worker.py'),
     projectConfigPath: cfg.configPath,
+    embedProvider: cfg.embedProvider,
+    embedModel: cfg.embedModel,
+    embedDim: cfg.embedDim,
+    secretsPath: cfg.secretsPath,
+    cohereApiKeyField: cfg.cohereApiKeyField,
 });
 const embed = (text) => embedWorker.embed(text);
 /* ── Tool catalog ───────────────────────────────────────────────────── */
@@ -89,6 +94,80 @@ const TOOLS = [
         },
     },
     {
+        name: 'wr_symbol_find',
+        description: 'Find indexed AST/symbol graph nodes in the project symbol collection. Best for declarations, functions, classes, interfaces, exports, calls, type relations.',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                query: { type: 'string', description: 'Symbol/concept query.' },
+                k: { type: 'number', description: 'Max symbols. Default 10.' },
+                kind: { type: 'string', description: 'Optional symbol kind filter: function/class/interface/type/enum/component/method.' },
+                lang: { type: 'string', description: 'Optional language filter: typescript/tsx/csharp.' },
+            },
+            required: ['query'],
+        },
+    },
+    {
+        name: 'wr_callers',
+        description: 'Find chunks whose structural graph payload calls or references the given symbol name.',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                symbol: { type: 'string', description: 'Function/class/type symbol name or FQN.' },
+                k: { type: 'number', description: 'Max chunks. Default 20.' },
+            },
+            required: ['symbol'],
+        },
+    },
+    {
+        name: 'wr_callees',
+        description: 'Return calls emitted by chunks matching a symbol name/FQN or all chunks in a file path.',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                symbolOrFile: { type: 'string', description: 'Symbol/FQN or absolute file path.' },
+                k: { type: 'number', description: 'Max chunks. Default 20.' },
+            },
+            required: ['symbolOrFile'],
+        },
+    },
+    {
+        name: 'wr_importers',
+        description: 'Find chunks/files importing a module string or resolved file path.',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                pathOrModule: { type: 'string', description: 'Import module string or absolute resolved file path.' },
+                k: { type: 'number', description: 'Max chunks. Default 20.' },
+            },
+            required: ['pathOrModule'],
+        },
+    },
+    {
+        name: 'wr_exports',
+        description: 'Return exports discovered in structural payloads for one absolute file path.',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                path: { type: 'string', description: 'Absolute file path.' },
+                k: { type: 'number', description: 'Max chunks. Default 100.' },
+            },
+            required: ['path'],
+        },
+    },
+    {
+        name: 'wr_arch_impact',
+        description: 'Architecture impact analysis combining semantic chunk hits, symbol-node hits, callers, importers, exports, and type-relation expansion.',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                description: { type: 'string', description: 'Natural-language change description.' },
+                k: { type: 'number', description: 'Max files. Default 15.' },
+            },
+            required: ['description'],
+        },
+    },
+    {
         name: 'wr_index_status',
         description: 'Index health. Returns collection name, status (green/yellow/red), points_count, vector dim.',
         inputSchema: { type: 'object', properties: {} },
@@ -128,6 +207,36 @@ const HANDLERS = {
             count: files.length,
             files,
         });
+    },
+    wr_symbol_find: async (a) => {
+        const results = await wrSymbolFind({
+            embed,
+            query: a.query ?? '',
+            k: a.k ?? 10,
+            kind: a.kind ?? null,
+            lang: a.lang ?? null,
+        });
+        return jsonContent({ tool: 'wr_symbol_find', query: a.query, count: results.length, results });
+    },
+    wr_callers: async (a) => {
+        const results = await wrCallers({ symbol: a.symbol ?? '', k: a.k ?? 20 });
+        return jsonContent({ tool: 'wr_callers', symbol: a.symbol, count: results.length, results });
+    },
+    wr_callees: async (a) => {
+        const result = await wrCallees({ symbolOrFile: a.symbolOrFile ?? '', k: a.k ?? 20 });
+        return jsonContent({ tool: 'wr_callees', symbolOrFile: a.symbolOrFile, ...result });
+    },
+    wr_importers: async (a) => {
+        const results = await wrImporters({ pathOrModule: a.pathOrModule ?? '', k: a.k ?? 20 });
+        return jsonContent({ tool: 'wr_importers', pathOrModule: a.pathOrModule, count: results.length, results });
+    },
+    wr_exports: async (a) => {
+        const result = await wrExports({ path: a.path ?? '', k: a.k ?? 100 });
+        return jsonContent({ tool: 'wr_exports', path: a.path, ...result });
+    },
+    wr_arch_impact: async (a) => {
+        const files = await wrArchImpact({ embed, description: a.description ?? '', k: a.k ?? 15 });
+        return jsonContent({ tool: 'wr_arch_impact', description: a.description, count: files.length, files });
     },
     wr_index_status: async () => jsonContent({ tool: 'wr_index_status', ...(await wrIndexStatus()) }),
 };

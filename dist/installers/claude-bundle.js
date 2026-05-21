@@ -64,6 +64,13 @@ async function writeProjectConfig(id, model, force) {
         // Always set file_index_path explicitly — prevents Path("") → "." bug
         // in Python config.py when this key is absent.
         file_index_path: path.join(projectConfigDir(id.projectRoot), '.file_index.json'),
+        graph_provider: 'qdrant',
+        neo4j: {
+            uri_env: 'NEO4J_URI',
+            user_env: 'NEO4J_USERNAME',
+            password_env: 'NEO4J_PASSWORD',
+            database_env: 'NEO4J_DATABASE',
+        },
     };
     if (model.provider === 'local-minilm') {
         cfg.model_path = miniLMPath();
@@ -97,6 +104,13 @@ async function writeProjectConfig(id, model, force) {
             if (!existing.file_index_path) {
                 existing.file_index_path = path.join(projectConfigDir(id.projectRoot), '.file_index.json');
             }
+            existing.graph_provider ??= 'qdrant';
+            existing.neo4j ??= {
+                uri_env: 'NEO4J_URI',
+                user_env: 'NEO4J_USERNAME',
+                password_env: 'NEO4J_PASSWORD',
+                database_env: 'NEO4J_DATABASE',
+            };
             delete existing.model_path;
             delete existing.secrets_path;
             delete existing.cohere_api_key_field;

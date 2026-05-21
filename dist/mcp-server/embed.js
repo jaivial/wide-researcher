@@ -5,11 +5,17 @@
 // On worker exit (crash, OOM): logs to stderr, restarts after 1 s
 // unless the JS side called `close()`.
 import { spawn } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import readline from 'node:readline';
 export class EmbedWorker {
     pythonPath;
     scriptPath;
     projectConfigPath;
+    embedProvider;
+    embedModel;
+    embedDim;
+    secretsPath;
+    cohereApiKeyField;
     queue = [];
     ready = false;
     closed = false;
@@ -19,11 +25,30 @@ export class EmbedWorker {
         this.pythonPath = opts.pythonPath;
         this.scriptPath = opts.scriptPath;
         this.projectConfigPath = opts.projectConfigPath;
+        this.embedProvider = opts.embedProvider;
+        this.embedModel = opts.embedModel;
+        this.embedDim = opts.embedDim;
+        this.secretsPath = opts.secretsPath;
+        this.cohereApiKeyField = opts.cohereApiKeyField;
         this._start();
+    }
+    _loadCohereApiKey() {
+        if (this.embedProvider !== 'cohere' || !this.secretsPath)
+            return null;
+        try {
+            const raw = readFileSync(this.secretsPath, 'utf8');
+            const json = JSON.parse(raw);
+            const key = json[this.cohereApiKeyField];
+            return typeof key === 'string' && key.length >= 20 ? key : null;
+        }
+        catch {
+            return null;
+        }
     }
     _start() {
         if (this.closed)
             return;
+        const cohereApiKey = this._loadCohereApiKey();
         this.proc = spawn(this.pythonPath, ['-u', this.scriptPath], {
             stdio: ['pipe', 'pipe', 'pipe'],
             env: {
@@ -32,6 +57,9 @@ export class EmbedWorker {
                 PYTHONUNBUFFERED: '1',
                 OMP_NUM_THREADS: '2',
                 ORT_NUM_THREADS: '2',
+                ...(cohereApiKey ? { COHERE_API_KEY: cohereApiKey } : {}),
+                COHERE_EMBED_MODEL: this.embedModel,
+                COHERE_EMBED_DIM: String(this.embedDim),
             },
         });
         const out = readline.createInterface({ input: this.proc.stdout });

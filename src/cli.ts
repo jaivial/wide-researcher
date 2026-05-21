@@ -4,9 +4,11 @@ import { Command } from 'commander';
 
 import { runInit } from './commands/init.js';
 import { runAdd } from './commands/add.js';
+import { runNeo4jSync } from './commands/neo4j-sync.js';
 import { runReindex } from './commands/reindex.js';
 import { runStatus } from './commands/status.js';
 import { runSearch } from './commands/search.js';
+import { runSymbolIndex } from './commands/symbol-index.js';
 import { runUninstall } from './commands/uninstall.js';
 import { log } from './utils/log.js';
 
@@ -139,6 +141,39 @@ program
   .action(async (opts: { json?: boolean }) => {
     try {
       await runStatus({ json: opts.json });
+    } catch (e) {
+      fail(e);
+    }
+  });
+
+program
+  .command('symbol-index')
+  .description('Payload-only AST/symbol graph update for existing code chunks; optional graph-node embeddings.')
+  .option('--force', 'Recompute symbol payloads for all supported TS/TSX/C# files')
+  .option('--max-files <n>', 'Process at most N changed files')
+  .option('--with-node-embeddings', 'Create/update the symbol graph-node Qdrant collection')
+  .option('--no-node-embeddings', 'Only update payloads on existing code chunks')
+  .action(async (opts: { force?: boolean; maxFiles?: string; withNodeEmbeddings?: boolean; nodeEmbeddings?: boolean }) => {
+    try {
+      const maxFiles = opts.maxFiles ? parseInt(opts.maxFiles, 10) : undefined;
+      await runSymbolIndex({
+        force: opts.force,
+        maxFiles: Number.isFinite(maxFiles) ? maxFiles : undefined,
+        nodeEmbeddings: opts.withNodeEmbeddings === true,
+      });
+    } catch (e) {
+      fail(e);
+    }
+  });
+
+program
+  .command('neo4j-sync')
+  .description('Sync Qdrant symbol payloads into optional Neo4j graph backend.')
+  .option('--max-files <n>', 'Process at most N files')
+  .action(async (opts: { maxFiles?: string }) => {
+    try {
+      const maxFiles = opts.maxFiles ? parseInt(opts.maxFiles, 10) : undefined;
+      await runNeo4jSync({ maxFiles: Number.isFinite(maxFiles) ? maxFiles : undefined });
     } catch (e) {
       fail(e);
     }

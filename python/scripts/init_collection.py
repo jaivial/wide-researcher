@@ -119,7 +119,29 @@ def ensure_collection(recreate: bool = False):
 
 def ensure_indexes():
     # Keyword indexes — fast equality filters
-    for field in ("repo", "language", "agent_owner", "atomic_layer", "file_path", "symbol_kind", "file_hash"):
+    for field in (
+        "repo",
+        "language",
+        "agent_owner",
+        "atomic_layer",
+        "file_path",
+        "symbol_kind",
+        "file_hash",
+        "symbol_id",
+        "symbol_fqn",
+        "declared_symbols",
+        "declared_symbol_ids",
+        "imports",
+        "imported_files",
+        "exports",
+        "calls",
+        "type_refs",
+        "base_types",
+        "implements",
+        "references",
+        "symbol_index_version",
+        "symbol_index_hash",
+    ):
         try:
             client.create_payload_index(
                 collection_name=COLL,
@@ -134,7 +156,7 @@ def ensure_indexes():
                 print(f"  index {field} FAILED: {e}")
 
     # Text indexes — built-in BM25-like full-text search
-    for field in ("content", "symbol_name"):
+    for field in ("content", "symbol_name", "graph_text"):
         try:
             client.create_payload_index(
                 collection_name=COLL,

@@ -124,15 +124,16 @@ export async function runStatus(opts: StatusOptions = {}): Promise<StatusReport>
   const id = deriveProjectIdentity(cwd);
   const installed = await exists(id.configPath);
 
-  // Load qdrant_url from project config when available; fall back to default.
   let qdrantUrl = 'http://127.0.0.1:6333';
+  let collectionName = id.slug;
   if (installed) {
     try {
       const raw = await fs.readFile(id.configPath, 'utf8');
-      const cfg = JSON.parse(raw) as { qdrant_url?: string };
+      const cfg = JSON.parse(raw) as { qdrant_url?: string; collection_name?: string };
       qdrantUrl = cfg.qdrant_url ?? qdrantUrl;
+      collectionName = cfg.collection_name ?? collectionName;
     } catch {
-      // ignore — stick with default
+      // ignore — stick with defaults
     }
   }
 
@@ -142,7 +143,7 @@ export async function runStatus(opts: StatusOptions = {}): Promise<StatusReport>
     lastIndexTimestamp(cwd),
   ]);
   const colInfo = reachable
-    ? await qdrantCollectionInfo(qdrantUrl, id.slug)
+    ? await qdrantCollectionInfo(qdrantUrl, collectionName)
     : {};
   const indexerState = await indexerServiceState(id.slug);
 
@@ -160,7 +161,7 @@ export async function runStatus(opts: StatusOptions = {}): Promise<StatusReport>
     qdrant: {
       reachable,
       url: qdrantUrl,
-      collection: id.slug,
+      collection: collectionName,
       ...colInfo,
     },
     indexer: {
@@ -182,7 +183,7 @@ export async function runStatus(opts: StatusOptions = {}): Promise<StatusReport>
     `${chalk.bold('installed')}   ${tick(installed)}  ${id.configPath}`,
     `${chalk.bold('qdrant bin')}  ${tick(hasQdrantBin)}  ${qdrantBinary()}`,
     `${chalk.bold('qdrant svc')}  ${tick(reachable)}  ${qdrantUrl}`,
-    `${chalk.bold('collection')}  ${pad(id.slug, 24)}`,
+    `${chalk.bold('collection')}  ${pad(collectionName, 24)}`,
     `  points    ${colInfo.pointsCount ?? '?'}`,
     `  vector    ${colInfo.vectorSize ?? '?'}-d ${colInfo.statusColor ? `(${colInfo.statusColor})` : ''}`,
     `${chalk.bold('indexer')}     ${indexerState}`,
