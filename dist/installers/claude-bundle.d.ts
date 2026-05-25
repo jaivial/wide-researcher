@@ -17,6 +17,14 @@ export interface InstallBundleOptions {
     force?: boolean;
     /** Resolved embed model (from the picker). */
     model: EmbedModel;
+    /**
+     * Used by the `update` command. Skips the project config rewrite path
+     * entirely so user-customised fields (excludes, batch_size, chunk_cap)
+     * survive a re-run. The embed-provider check inside writeProjectConfig
+     * is fine for first-install and re-init flows but throws away custom
+     * fields when force=true is set by a bulk refresh.
+     */
+    keepProjectConfig?: boolean;
 }
 export interface UninstallBundleOptions {
     /** Project root. Defaults to cwd. */

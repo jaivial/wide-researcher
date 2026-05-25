@@ -323,7 +323,12 @@ export async function installClaudeBundle(opts) {
     const id = deriveProjectIdentity(opts.cwd);
     const force = !!opts.force;
     log.step(`project=${id.projectName} slug=${id.slug}`);
-    await writeProjectConfig(id, opts.model, force);
+    if (opts.keepProjectConfig) {
+        log.skip(`project config kept (${id.configPath})`);
+    }
+    else {
+        await writeProjectConfig(id, opts.model, force);
+    }
     await writeClaudeBundle(id, force);
     await writeMcpStanza(id, force);
     const hookScriptPath = await writeHookScript(id, force);

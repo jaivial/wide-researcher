@@ -83,6 +83,14 @@ export interface InstallBundleOptions {
   force?: boolean;
   /** Resolved embed model (from the picker). */
   model: EmbedModel;
+  /**
+   * Used by the `update` command. Skips the project config rewrite path
+   * entirely so user-customised fields (excludes, batch_size, chunk_cap)
+   * survive a re-run. The embed-provider check inside writeProjectConfig
+   * is fine for first-install and re-init flows but throws away custom
+   * fields when force=true is set by a bulk refresh.
+   */
+  keepProjectConfig?: boolean;
 }
 
 export interface UninstallBundleOptions {
@@ -432,7 +440,11 @@ export async function installClaudeBundle(
   const force = !!opts.force;
 
   log.step(`project=${id.projectName} slug=${id.slug}`);
-  await writeProjectConfig(id, opts.model, force);
+  if (opts.keepProjectConfig) {
+    log.skip(`project config kept (${id.configPath})`);
+  } else {
+    await writeProjectConfig(id, opts.model, force);
+  }
   await writeClaudeBundle(id, force);
   await writeMcpStanza(id, force);
   const hookScriptPath = await writeHookScript(id, force);

@@ -1,4 +1,7 @@
 // wide-researcher CLI entry point.
+import { readFileSync } from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { Command } from 'commander';
 import { runInit } from './commands/init.js';
 import { runAdd } from './commands/add.js';
@@ -9,12 +12,26 @@ import { runStatus } from './commands/status.js';
 import { runSearch } from './commands/search.js';
 import { runSymbolIndex } from './commands/symbol-index.js';
 import { runUninstall } from './commands/uninstall.js';
+import { runUpdate } from './commands/update.js';
 import { log } from './utils/log.js';
+// Resolve version from the package.json shipped with this build so the
+// CLI never lies about its own release (the prior hardcoded string drifted
+// behind every alpha bump).
+const PKG_VERSION = (() => {
+    try {
+        const here = path.dirname(fileURLToPath(import.meta.url));
+        const pkg = JSON.parse(readFileSync(path.resolve(here, '..', 'package.json'), 'utf8'));
+        return pkg.version ?? '0.0.0';
+    }
+    catch {
+        return '0.0.0';
+    }
+})();
 const program = new Command();
 program
     .name('wide-researcher')
     .description('Qdrant-backed semantic code-search, AST/symbol graph search, and impact-radius diagrams for Claude Code.')
-    .version('0.1.0-alpha.25');
+    .version(PKG_VERSION);
 function fail(e) {
     log.error(e.message);
     process.exit(1);
@@ -174,6 +191,27 @@ program
         await runSearch(query, {
             mode: opts.mode ?? 'semantic',
             topK: opts.topK ? parseInt(opts.topK, 10) : 10,
+        });
+    }
+    catch (e) {
+        fail(e);
+    }
+});
+program
+    .command('update')
+    .description("Refresh the per-project bundle after `npm i -g wide-researcher@latest`. " +
+    "Preserves config, secrets, and the existing Qdrant collection — only " +
+    "rewrites .claude/ skill files, the .mcp.json stanza, the prompt hook, " +
+    "the supervisor unit, and (by default) the Python venv deps.")
+    .option('--no-pip-upgrade', 'Skip the `pip install -U -r requirements.txt` step')
+    .option('--no-restart', 'Skip restarting the systemd/launchd indexer service')
+    .option('--no-supervisor', 'Skip rewriting the supervisor unit')
+    .action(async (opts) => {
+    try {
+        await runUpdate({
+            noPipUpgrade: opts.pipUpgrade === false,
+            noRestart: opts.restart === false,
+            noSupervisor: opts.supervisor === false,
         });
     }
     catch (e) {

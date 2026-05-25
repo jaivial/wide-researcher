@@ -85,6 +85,30 @@ npx wide-researcher add
 
 Switching between models that share the same vector dimensionality (e.g. GTE-Qwen2 ↔ Cohere, both 1536-d) doesn't require a reindex — the existing vectors stay valid. Switching to a different dimensionality triggers a full reindex; `init` will offer to snapshot the old collection first.
 
+### Upgrading to a newer release
+
+For machines that already ran `init` at least once, refresh the per-project bundle without touching the Qdrant collection, secrets, or any custom config:
+
+```bash
+# 1. pull the new npm release
+npm install -g wide-researcher@latest
+
+# 2. inside each project that uses wide-researcher
+wide-researcher update
+```
+
+`update` rewrites the things that change between alpha releases (`.claude/skills/`, `.claude/agents/`, the `.mcp.json` stanza, the prompt-submit hook, and the systemd / launchd indexer unit), upgrades the venv's pip deps in place, and restarts the watcher daemon so it picks up the new code. It explicitly does **not** touch your Qdrant collection, `secrets.json`, or your project's `.wide-researcher/config.json` — so custom excludes, batch sizes, or graph-backend choices survive.
+
+Flags:
+
+```bash
+wide-researcher update --no-pip-upgrade   # skip `pip install -U -r requirements.txt`
+wide-researcher update --no-restart       # skip systemd/launchd restart
+wide-researcher update --no-supervisor    # skip unit rewrite + restart
+```
+
+After running, reopen Claude Code so it spawns a fresh MCP server against the new dist code.
+
 ---
 
 ## What you get inside Claude Code
@@ -119,6 +143,8 @@ Plus a project-scoped **agent** (`.claude/agents/wide-researcher.md`) that wraps
 ```
 wide-researcher init                 first-time setup on this machine
 wide-researcher add                  add to a new project (skip global)
+wide-researcher update               refresh project bundle after npm upgrade
+                                      (keeps qdrant data + secrets + config)
 wide-researcher reindex              incremental reindex
 wide-researcher reindex --force      full rebuild
 wide-researcher status               qdrant + indexer + last-index time
