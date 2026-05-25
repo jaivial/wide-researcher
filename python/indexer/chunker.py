@@ -21,11 +21,34 @@ from .chunker_cs import chunk_cs
 from .chunker_py import chunk_py
 from .chunker_go import chunk_go
 from .chunker_rust import chunk_rust
+from .config import CHUNK_CAP
 
 log = logging.getLogger(__name__)
 
 
-MAX_CHUNKS_PER_FILE = 200
+# Priority for chunk-cap eviction. Higher = kept first. Anything not listed
+# falls into "block" (lowest tier). Order matters: class > module > function
+# > method > component > block.
+_SYMBOL_KIND_PRIORITY: dict[str, int] = {
+    "class": 100,
+    "interface": 95,
+    "type": 90,
+    "enum": 88,
+    "module": 80,
+    "namespace": 78,
+    "trait": 75,
+    "impl": 72,
+    "function": 70,
+    "method": 65,
+    "component": 60,
+    "hook": 55,
+    "section": 40,  # markdown headings, JSON-locale keys
+    "block": 10,
+}
+
+
+def _kind_priority(kind: str | None) -> int:
+    return _SYMBOL_KIND_PRIORITY.get(kind or "block", 10)
 
 
 def chunk_file(abs_path: str, language: str, source: str) -> list[Chunk]:
@@ -59,11 +82,20 @@ def chunk_file(abs_path: str, language: str, source: str) -> list[Chunk]:
     if not raw:
         raw = chunk_lines_fallback(source, symbol_kind="block")
 
-    if len(raw) > MAX_CHUNKS_PER_FILE:
+    if len(raw) > CHUNK_CAP:
         log.warning(
-            "chunk-cap hit on %s: %d → %d", abs_path, len(raw), MAX_CHUNKS_PER_FILE
+            "chunk-cap hit on %s: %d → %d (priority-pruned, kept high-value symbols)",
+            abs_path, len(raw), CHUNK_CAP,
         )
-        raw = raw[:MAX_CHUNKS_PER_FILE]
+        # Priority prune: keep the highest-value chunks instead of silently
+        # dropping the tail of the file. Preserves original order so chunk
+        # neighbors stay coherent (small tweak — sort indices, then materialise).
+        ordered = sorted(
+            enumerate(raw),
+            key=lambda iv: (-_kind_priority(iv[1].symbol_kind), iv[0]),
+        )
+        keep_indices = sorted(i for i, _ in ordered[:CHUNK_CAP])
+        raw = [raw[i] for i in keep_indices]
 
     out: list[Chunk] = []
     for c in raw:

@@ -1,4 +1,5 @@
 type EmbedFn = (text: string) => Promise<number[]>;
+type RerankFn = (query: string, docs: string[]) => Promise<number[]>;
 interface SearchResult {
     id: string | number;
     file_path?: string;
@@ -30,12 +31,15 @@ interface SearchResult {
 }
 export interface FindOpts {
     embed: EmbedFn;
+    rerank?: RerankFn;
     query: string;
     k?: number;
     lang?: string | null;
     role?: string | null;
     layer?: string | null;
     mode?: 'semantic' | 'keyword' | 'hybrid';
+    diversify?: boolean;
+    perFileCap?: number;
 }
 export declare function wrFind(opts: FindOpts): Promise<SearchResult[]>;
 export interface FileChunk {
@@ -75,6 +79,7 @@ export interface SymbolSearchResult {
 }
 export declare function wrSymbolFind(opts: {
     embed: EmbedFn;
+    rerank?: RerankFn;
     query: string;
     k?: number;
     kind?: string | null;
@@ -116,6 +121,7 @@ export interface ArchImpactFile {
 }
 export declare function wrArchImpact(opts: {
     embed: EmbedFn;
+    rerank?: RerankFn;
     description: string;
     k?: number;
 }): Promise<ArchImpactFile[]>;
@@ -129,6 +135,7 @@ export interface ImpactFile {
 }
 export declare function wrImpact(opts: {
     embed: EmbedFn;
+    rerank?: RerankFn;
     description: string;
     k?: number;
 }): Promise<ImpactFile[]>;

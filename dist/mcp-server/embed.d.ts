@@ -28,6 +28,8 @@ export declare class EmbedWorker {
     private _loadCohereApiKey;
     private _start;
     waitReady(timeoutMs?: number): Promise<void>;
+    private cacheKey;
     embed(query: string): Promise<number[]>;
+    rerank(query: string, docs: string[]): Promise<number[]>;
     close(): Promise<void>;
 }

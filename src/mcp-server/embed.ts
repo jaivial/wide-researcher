@@ -9,8 +9,14 @@ import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import readline from 'node:readline';
 
+import { getEmbed, putEmbed } from '../utils/cache.js';
+
+type WorkerOk = { ok: true; vec?: number[]; vecs?: number[][]; scores?: number[] };
+type WorkerErr = { ok: false; err?: string };
+type WorkerMsg = WorkerOk | WorkerErr;
+
 interface PendingRequest {
-  resolve: (v: number[]) => void;
+  resolve: (v: WorkerOk) => void;
   reject: (e: Error) => void;
 }
 
@@ -91,9 +97,9 @@ export class EmbedWorker {
         return;
       }
       try {
-        const msg = JSON.parse(line) as { ok: boolean; vec?: number[]; err?: string };
-        if (msg.ok && Array.isArray(msg.vec)) {
-          handler.resolve(msg.vec);
+        const msg = JSON.parse(line) as WorkerMsg;
+        if (msg.ok) {
+          handler.resolve(msg);
         } else {
           handler.reject(new Error(msg.err ?? 'embed worker error'));
         }
@@ -145,11 +151,47 @@ export class EmbedWorker {
     });
   }
 
+  private cacheKey(): string {
+    return `${this.embedProvider}::${this.embedModel}::${this.embedDim}`;
+  }
+
   async embed(query: string): Promise<number[]> {
+    const normalized = String(query).replaceAll('\n', ' ');
+    const modelId = this.cacheKey();
+    const cached = await getEmbed(modelId, normalized);
+    if (cached) return cached;
+    await this.waitReady();
+    const vec = await new Promise<number[]>((resolve, reject) => {
+      this.queue.push({
+        resolve: (msg) => {
+          if (Array.isArray(msg.vec)) resolve(msg.vec);
+          else reject(new Error('embed worker missing vec'));
+        },
+        reject,
+      });
+      const req = JSON.stringify({ op: 'embed', text: normalized });
+      this.proc?.stdin.write(req + '\n');
+    });
+    if (vec.length > 0) await putEmbed(modelId, normalized, vec);
+    return vec;
+  }
+
+  async rerank(query: string, docs: string[]): Promise<number[]> {
+    if (docs.length === 0) return [];
     await this.waitReady();
     return new Promise<number[]>((resolve, reject) => {
-      this.queue.push({ resolve, reject });
-      const req = JSON.stringify({ op: 'embed', text: String(query).replaceAll('\n', ' ') });
+      this.queue.push({
+        resolve: (msg) => {
+          if (Array.isArray(msg.scores)) resolve(msg.scores);
+          else reject(new Error('embed worker missing scores'));
+        },
+        reject,
+      });
+      const req = JSON.stringify({
+        op: 'rerank',
+        query: String(query).replaceAll('\n', ' '),
+        docs,
+      });
       this.proc?.stdin.write(req + '\n');
     });
   }

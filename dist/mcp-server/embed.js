@@ -7,6 +7,7 @@
 import { spawn } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import readline from 'node:readline';
+import { getEmbed, putEmbed } from '../utils/cache.js';
 export class EmbedWorker {
     pythonPath;
     scriptPath;
@@ -71,8 +72,8 @@ export class EmbedWorker {
             }
             try {
                 const msg = JSON.parse(line);
-                if (msg.ok && Array.isArray(msg.vec)) {
-                    handler.resolve(msg.vec);
+                if (msg.ok) {
+                    handler.resolve(msg);
                 }
                 else {
                     handler.reject(new Error(msg.err ?? 'embed worker error'));
@@ -125,11 +126,52 @@ export class EmbedWorker {
             this.readyResolvers.push(wrapped);
         });
     }
+    cacheKey() {
+        return `${this.embedProvider}::${this.embedModel}::${this.embedDim}`;
+    }
     async embed(query) {
+        const normalized = String(query).replaceAll('\n', ' ');
+        const modelId = this.cacheKey();
+        const cached = await getEmbed(modelId, normalized);
+        if (cached)
+            return cached;
+        await this.waitReady();
+        const vec = await new Promise((resolve, reject) => {
+            this.queue.push({
+                resolve: (msg) => {
+                    if (Array.isArray(msg.vec))
+                        resolve(msg.vec);
+                    else
+                        reject(new Error('embed worker missing vec'));
+                },
+                reject,
+            });
+            const req = JSON.stringify({ op: 'embed', text: normalized });
+            this.proc?.stdin.write(req + '\n');
+        });
+        if (vec.length > 0)
+            await putEmbed(modelId, normalized, vec);
+        return vec;
+    }
+    async rerank(query, docs) {
+        if (docs.length === 0)
+            return [];
         await this.waitReady();
         return new Promise((resolve, reject) => {
-            this.queue.push({ resolve, reject });
-            const req = JSON.stringify({ op: 'embed', text: String(query).replaceAll('\n', ' ') });
+            this.queue.push({
+                resolve: (msg) => {
+                    if (Array.isArray(msg.scores))
+                        resolve(msg.scores);
+                    else
+                        reject(new Error('embed worker missing scores'));
+                },
+                reject,
+            });
+            const req = JSON.stringify({
+                op: 'rerank',
+                query: String(query).replaceAll('\n', ' '),
+                docs,
+            });
             this.proc?.stdin.write(req + '\n');
         });
     }

@@ -20,7 +20,12 @@ import {
 } from './neo4j.js';
 
 type EmbedFn = (text: string) => Promise<number[]>;
+type RerankFn = (query: string, docs: string[]) => Promise<number[]>;
 const SYMBOL_COLLECTION = `${COLLECTION}_symbols`;
+
+// Per-file cap applied after rerank for diversification. Prevents one
+// chunk-dense file (e.g. a generated SDK) from monopolising the top-k.
+const PER_FILE_CAP_DEFAULT = 3;
 
 interface QdrantPoint {
   id: string | number;
@@ -133,45 +138,156 @@ function impactWeight(language: string | undefined, filePath: string | undefined
   return IMPACT_WEIGHT[language ?? ''] ?? 1.0;
 }
 
+/* ── window expansion ───────────────────────────────────────────────────
+ * Fetches the ±1 neighbor chunks of each hit and stitches their content
+ * into one wider passage. Reranker quality is materially better with
+ * 200–600 line windows than with 50-line raw chunks, so this is done
+ * unconditionally before rerank.
+ */
+
+async function expandWindows(rows: SearchResult[]): Promise<SearchResult[]> {
+  if (rows.length === 0) return rows;
+  const byFile = new Map<string, SearchResult[]>();
+  for (const r of rows) {
+    if (!r.file_path) continue;
+    const arr = byFile.get(r.file_path) ?? [];
+    arr.push(r);
+    byFile.set(r.file_path, arr);
+  }
+  const idCache = new Map<string, string>();
+  await Promise.all(
+    [...byFile.entries()].map(async ([file_path, hits]) => {
+      const chunks = (await qdrant.scroll(COLLECTION, {
+        filter: { must: [{ key: 'file_path', match: { value: file_path } }] },
+        limit: 500,
+        with_payload: true,
+        with_vector: false,
+      })) as { points?: QdrantPoint[] };
+      const ordered = (chunks.points ?? [])
+        .map((pt) => ({ pt, idx: (pt.payload?.chunk_index as number) ?? 0 }))
+        .sort((a, b) => a.idx - b.idx);
+      const indexById = new Map<string, number>();
+      ordered.forEach((entry, i) => indexById.set(String(entry.pt.id), i));
+      for (const hit of hits) {
+        const k = `${file_path}:${hit.id}`;
+        const pos = indexById.get(String(hit.id));
+        if (pos === undefined) continue;
+        const start = Math.max(0, pos - 1);
+        const end = Math.min(ordered.length - 1, pos + 1);
+        const text = ordered
+          .slice(start, end + 1)
+          .map(({ pt }) => (pt.payload?.content as string) ?? '')
+          .join('\n');
+        if (text) idCache.set(k, text.slice(0, 4000));
+      }
+    }),
+  );
+  return rows.map((r) => {
+    if (!r.file_path) return r;
+    const text = idCache.get(`${r.file_path}:${r.id}`);
+    return text ? { ...r, preview: text.slice(0, 500), _rerank_text: text } as SearchResult & { _rerank_text: string } : r;
+  });
+}
+
+/* ── rerank stage ───────────────────────────────────────────────────────
+ * Cohere rerank-v3.5 over the expanded windows. Replaces RRF reciprocal
+ * score with the cross-encoder relevance score so the downstream
+ * aggregator weights by post-rerank relevance.
+ */
+
+async function rerankRows(
+  rerank: RerankFn | undefined,
+  query: string,
+  rows: SearchResult[],
+  keep: number,
+): Promise<SearchResult[]> {
+  if (!rerank || rows.length === 0) return rows;
+  const docs = rows.map((r) => {
+    const widened = (r as SearchResult & { _rerank_text?: string })._rerank_text;
+    if (widened && widened.length > 0) return widened;
+    return r.code_lines.map((l) => l.text).join('\n').slice(0, 4000);
+  });
+  let scores: number[];
+  try {
+    scores = await rerank(query, docs);
+  } catch (e) {
+    process.stderr.write(`[wide-researcher] rerank skipped: ${(e as Error).message}\n`);
+    return rows.slice(0, keep);
+  }
+  if (scores.length !== rows.length) return rows.slice(0, keep);
+  return rows
+    .map((row, i) => ({ ...row, score: scores[i] ?? 0 }))
+    .sort((a, b) => (b.score ?? 0) - (a.score ?? 0))
+    .slice(0, keep);
+}
+
+/* ── diversification ────────────────────────────────────────────────────
+ * Per-file cap. Keeps ranking order. Cheap; no embedding-MMR needed
+ * since rerank scores already capture per-chunk relevance.
+ */
+
+function diversifyByFile(rows: SearchResult[], cap: number): SearchResult[] {
+  if (cap <= 0) return rows;
+  const counts = new Map<string, number>();
+  const out: SearchResult[] = [];
+  for (const r of rows) {
+    const key = r.file_path ?? `__no_file__${r.id}`;
+    const c = counts.get(key) ?? 0;
+    if (c >= cap) continue;
+    counts.set(key, c + 1);
+    out.push(r);
+  }
+  return out;
+}
+
 /* ── search modes ───────────────────────────────────────────────────── */
 
 interface ModeOpts {
   embed: EmbedFn;
+  rerank?: RerankFn;
   queryText: string;
   top_k: number;
   filter: ReturnType<typeof buildFilter>;
+  diversify?: boolean;
+  perFileCap?: number;
 }
+
+const FUSION_MULTIPLIER = 6;
 
 async function searchSemantic(opts: ModeOpts): Promise<SearchResult[]> {
   const vec = await opts.embed(opts.queryText);
+  const fetchK = opts.rerank ? Math.max(opts.top_k * FUSION_MULTIPLIER, 40) : opts.top_k;
   const res = (await qdrant.query(COLLECTION, {
     query: vec,
-    limit: opts.top_k,
+    limit: fetchK,
     filter: opts.filter,
     with_payload: true,
     params: { hnsw_ef: 128 },
   })) as { points?: QdrantPoint[] };
-  return (res.points ?? []).map(payloadToResult);
+  const rows = (res.points ?? []).map(payloadToResult);
+  return finalizeSearch(opts, rows);
 }
 
 async function searchKeyword(
-  opts: Omit<ModeOpts, 'embed'>,
+  opts: Omit<ModeOpts, 'embed'> & { embed?: EmbedFn },
 ): Promise<SearchResult[]> {
   const must: Record<string, unknown>[] = [
     { key: 'content', match: { text: opts.queryText } },
   ];
+  const fetchK = opts.rerank ? Math.max(opts.top_k * FUSION_MULTIPLIER, 40) : opts.top_k;
   // keyword mode ignores role/atomic_layer — they were indexed inconsistently
   // (null in Qdrant, correct values in metadata) and filtering causes false negatives
   const res = (await qdrant.scroll(COLLECTION, {
     filter: { must },
-    limit: opts.top_k,
+    limit: fetchK,
     with_payload: true,
     with_vector: false,
   })) as { points?: QdrantPoint[] };
-  return (res.points ?? []).map((pt) => ({
+  const rows = (res.points ?? []).map((pt) => ({
     ...payloadToResult(pt),
     score: 1.0,
   }));
+  return finalizeSearch(opts as ModeOpts, rows);
 }
 
 async function searchHybrid(opts: ModeOpts): Promise<SearchResult[]> {
@@ -184,16 +300,36 @@ async function searchHybrid(opts: ModeOpts): Promise<SearchResult[]> {
   const semanticFilter = opts.filter
     ? { must: opts.filter.must.filter(f => f.key === 'language') }
     : undefined;
+  const fetchK = opts.rerank ? Math.max(opts.top_k * FUSION_MULTIPLIER, 40) : opts.top_k;
   const res = (await qdrant.query(COLLECTION, {
     prefetch: [
-      { query: vec, using: '', limit: opts.top_k * 4, filter: semanticFilter },
-      { filter: { must: keywordMust }, limit: opts.top_k * 4 },
+      { query: vec, using: '', limit: fetchK, filter: semanticFilter },
+      { filter: { must: keywordMust }, limit: fetchK },
     ],
     query: { fusion: 'rrf' },
-    limit: opts.top_k,
+    limit: fetchK,
     with_payload: true,
   })) as { points?: QdrantPoint[] };
-  return (res.points ?? []).map(payloadToResult);
+  const rows = (res.points ?? []).map(payloadToResult);
+  return finalizeSearch(opts, rows);
+}
+
+/* Window-expand → rerank → diversify → top-k.
+ *
+ * Centralised so all three modes get the same post-retrieval pipeline.
+ * Reranking is gated by the presence of `rerank` on the opts; absent it,
+ * this collapses to "trim to top_k".
+ */
+async function finalizeSearch(opts: ModeOpts, rows: SearchResult[]): Promise<SearchResult[]> {
+  let working = rows;
+  if (opts.rerank) {
+    working = await expandWindows(working);
+    working = await rerankRows(opts.rerank, opts.queryText, working, opts.top_k * 2);
+  }
+  if (opts.diversify !== false) {
+    working = diversifyByFile(working, opts.perFileCap ?? PER_FILE_CAP_DEFAULT);
+  }
+  return working.slice(0, opts.top_k);
 }
 
 /* ── graph helpers ──────────────────────────────────────────────────── */
@@ -230,12 +366,15 @@ function symbolName(symbol: string): string {
 
 export interface FindOpts {
   embed: EmbedFn;
+  rerank?: RerankFn;
   query: string;
   k?: number;
   lang?: string | null;
   role?: string | null;
   layer?: string | null;
   mode?: 'semantic' | 'keyword' | 'hybrid';
+  diversify?: boolean;
+  perFileCap?: number;
 }
 
 export async function wrFind(opts: FindOpts): Promise<SearchResult[]> {
@@ -247,25 +386,19 @@ export async function wrFind(opts: FindOpts): Promise<SearchResult[]> {
     atomic_layer: opts.layer,
   });
 
-  let rows: SearchResult[];
-  if (mode === 'semantic') {
-    rows = await searchSemantic({
-      embed: opts.embed,
-      queryText: opts.query,
-      top_k: k,
-      filter,
-    });
-  } else if (mode === 'keyword') {
-    rows = await searchKeyword({ queryText: opts.query, top_k: k, filter });
-  } else {
-    rows = await searchHybrid({
-      embed: opts.embed,
-      queryText: opts.query,
-      top_k: k,
-      filter,
-    });
-  }
-  return rows;
+  const baseOpts: ModeOpts = {
+    embed: opts.embed,
+    rerank: opts.rerank,
+    queryText: opts.query,
+    top_k: k,
+    filter,
+    diversify: opts.diversify,
+    perFileCap: opts.perFileCap,
+  };
+
+  if (mode === 'semantic') return searchSemantic(baseOpts);
+  if (mode === 'keyword') return searchKeyword(baseOpts);
+  return searchHybrid(baseOpts);
 }
 
 export interface FileChunk {
@@ -354,6 +487,7 @@ function payloadToSymbolResult(point: QdrantPoint): SymbolSearchResult {
 
 export async function wrSymbolFind(opts: {
   embed: EmbedFn;
+  rerank?: RerankFn;
   query: string;
   k?: number;
   kind?: string | null;
@@ -366,16 +500,31 @@ export async function wrSymbolFind(opts: {
   if (opts.lang) must.push({ key: 'language', match: { value: opts.lang } });
   const semanticFilter = must.length ? { must } : undefined;
   const keywordFilter = { must: [{ key: 'graph_text', match: { text: opts.query } }, ...must] };
+  const fetchK = opts.rerank ? Math.max(k * FUSION_MULTIPLIER, 40) : k;
   const res = (await qdrant.query(SYMBOL_COLLECTION, {
     prefetch: [
-      { query: vec, limit: k * 4, filter: semanticFilter },
-      { filter: keywordFilter, limit: k * 4 },
+      { query: vec, limit: fetchK, filter: semanticFilter },
+      { filter: keywordFilter, limit: fetchK },
     ],
     query: { fusion: 'rrf' },
-    limit: k,
+    limit: fetchK,
     with_payload: true,
   })) as { points?: QdrantPoint[] };
-  return (res.points ?? []).map(payloadToSymbolResult);
+  const rows = (res.points ?? []).map(payloadToSymbolResult);
+  if (!opts.rerank || rows.length === 0) return rows.slice(0, k);
+  const docs = rows.map((r) => (r.graph_text ?? r.signature ?? r.fqn ?? r.name ?? '').slice(0, 4000));
+  let scores: number[];
+  try {
+    scores = await opts.rerank(opts.query, docs);
+  } catch (e) {
+    process.stderr.write(`[wide-researcher] symbol rerank skipped: ${(e as Error).message}\n`);
+    return rows.slice(0, k);
+  }
+  if (scores.length !== rows.length) return rows.slice(0, k);
+  return rows
+    .map((row, i) => ({ ...row, score: scores[i] ?? 0 }))
+    .sort((a, b) => (b.score ?? 0) - (a.score ?? 0))
+    .slice(0, k);
 }
 
 export async function wrCallers(opts: { symbol: string; k?: number }): Promise<SearchResult[]> {
@@ -484,11 +633,19 @@ function addArchImpact(
 
 export async function wrArchImpact(opts: {
   embed: EmbedFn;
+  rerank?: RerankFn;
   description: string;
   k?: number;
 }): Promise<ArchImpactFile[]> {
   const k = opts.k ?? 15;
-  const semanticHits = await searchHybrid({ embed: opts.embed, queryText: opts.description, top_k: 80, filter: undefined });
+  const semanticHits = await searchHybrid({
+    embed: opts.embed,
+    rerank: opts.rerank,
+    queryText: opts.description,
+    top_k: 80,
+    filter: undefined,
+    diversify: false,
+  });
   let symbolHits: SymbolSearchResult[] = [];
   try {
     symbolHits = await wrSymbolFind({ embed: opts.embed, query: opts.description, k: 40 });
@@ -590,15 +747,18 @@ export interface ImpactFile {
 
 export async function wrImpact(opts: {
   embed: EmbedFn;
+  rerank?: RerankFn;
   description: string;
   k?: number;
 }): Promise<ImpactFile[]> {
   const k = opts.k ?? 15;
   const hits = await searchHybrid({
     embed: opts.embed,
+    rerank: opts.rerank,
     queryText: opts.description,
     top_k: 80,
     filter: undefined,
+    diversify: false,
   });
   const byFile = new Map<string, ImpactFile & { _symbols: Set<string> }>();
   for (const h of hits) {

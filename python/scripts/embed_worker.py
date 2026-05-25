@@ -1,16 +1,14 @@
 """Long-lived embed + rerank worker for the MCP server.
 
-Uses the Cohere API (same as the indexer) so embeddings are 1536-dim
-and match the Qdrant collection dimension.
+Uses the Cohere API for both embeddings (1536-dim, same as the indexer)
+AND cross-encoder reranking (rerank-v3.5). No local models needed.
 
 Reads one JSON line per request on stdin. Each request has an `op` field:
 
-  {"op": "embed", "text": "..."}        -> {"ok": true, "vec": [...]}
-  {"op": "rerank", "query": "...",      -> {"ok": true, "scores": [...]}
+  {"op": "embed", "text": "..."}              -> {"ok": true, "vec": [...]}
+  {"op": "embed_batch", "texts": [...]}        -> {"ok": true, "vecs": [...]}
+  {"op": "rerank", "query": "...",             -> {"ok": true, "scores": [...]}
     "docs": ["...", "..."]}
-
-Loads the rerank cross-encoder once at startup; embeddings go through the
-Cohere API directly (no local model needed).
 """
 from __future__ import annotations
 
@@ -18,7 +16,6 @@ import json
 import os
 import sys
 import time
-from concurrent.futures import ThreadPoolExecutor
 
 import requests
 
@@ -26,20 +23,10 @@ import requests
 COHERE_API_KEY = os.environ.get("COHERE_API_KEY", "")
 COHERE_MODEL = os.environ.get("COHERE_EMBED_MODEL", "embed-v4.0")
 COHERE_URL = "https://api.cohere.ai/v2/embed"
+COHERE_RERANK_URL = "https://api.cohere.ai/v2/rerank"
+COHERE_RERANK_MODEL = os.environ.get("COHERE_RERANK_MODEL", "rerank-v3.5")
 EMBED_DIM = int(os.environ.get("COHERE_EMBED_DIM", "1536"))
-
-# Max concurrent Cohere requests (avoid rate limiting)
-_executor = ThreadPoolExecutor(max_workers=8)
-
-# Load cross-encoder reranker at startup (optional — graceful fallback if unavailable)
-_reranker = None
-if os.environ.get("DISABLE_RERANK", "") != "1":
-    try:
-        from fastembed.rerank.cross_encoder import TextCrossEncoder
-        RERANK_MODEL = os.environ.get("RERANK_MODEL", "Xenova/ms-marco-MiniLM-L-6-v2")
-        _reranker = TextCrossEncoder(RERANK_MODEL)
-    except Exception as e:
-        sys.stderr.write(f"[embed_worker] rerank model unavailable: {e}\n")
+RERANK_DISABLED = os.environ.get("DISABLE_RERANK", "") == "1"
 
 # ── Cohere embed ─────────────────────────────────────────────────────────────
 
@@ -137,19 +124,64 @@ def _embed_batch(texts: list[str]) -> list[list[float]]:
     return results
 
 
-# ── Rerank ──────────────────────────────────────────────────────────────────
+# ── Rerank (Cohere rerank-v3.5) ─────────────────────────────────────────────
+
 
 def _rerank(query: str, docs: list[str]) -> list[float]:
+    """Call Cohere v2/rerank. Returns one relevance score per input doc,
+    in the SAME ORDER as `docs` so the caller can pair them with their
+    original Qdrant points without an index translation step.
+
+    Failure modes return a flat 1.0 vector so reranking degrades to a
+    no-op rather than blowing up the search call.
+    """
     if not docs:
         return []
-    if _reranker is None:
+    if RERANK_DISABLED or not COHERE_API_KEY:
         return [1.0] * len(docs)
-    try:
-        scores = list(_reranker.rerank(query, docs))
-        return [float(s) for s in scores]
-    except Exception as e:
-        sys.stderr.write(f"[embed_worker] rerank error: {e}\n")
-        return [1.0] * len(docs)
+
+    truncated = [d[:4096] if isinstance(d, str) else "" for d in docs]
+    payload = {
+        "model": COHERE_RERANK_MODEL,
+        "query": query[:4096],
+        "documents": truncated,
+        "top_n": len(truncated),
+    }
+    headers = {
+        "Authorization": f"Bearer {COHERE_API_KEY}",
+        "Content-Type": "application/json",
+    }
+
+    backoff = 1.0
+    last_err: str | None = None
+    for attempt in range(1, 4):
+        try:
+            resp = requests.post(COHERE_RERANK_URL, json=payload, headers=headers, timeout=30)
+            if resp.status_code == 200:
+                data = resp.json()
+                results = data.get("results", [])
+                scores = [0.0] * len(truncated)
+                for entry in results:
+                    idx = entry.get("index")
+                    score = entry.get("relevance_score", 0.0)
+                    if isinstance(idx, int) and 0 <= idx < len(scores):
+                        scores[idx] = float(score)
+                return scores
+            if resp.status_code == 429 or resp.status_code >= 500:
+                last_err = f"Cohere rerank {resp.status_code}"
+                time.sleep(backoff)
+                backoff *= 2
+                continue
+            raise RuntimeError(
+                f"Cohere rerank error {resp.status_code}: {resp.text[:200]}"
+            )
+        except (requests.ConnectionError, requests.Timeout) as e:
+            last_err = f"Cohere rerank unreachable: {e}"
+            time.sleep(backoff)
+            backoff *= 2
+
+    sys.stderr.write(f"[embed_worker] rerank failed: {last_err}\n")
+    return [1.0] * len(docs)
 
 
 # ── Main loop ────────────────────────────────────────────────────────────────

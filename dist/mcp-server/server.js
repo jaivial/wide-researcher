@@ -17,6 +17,7 @@ import { loadProjectConfig } from './config.js';
 import { EmbedWorker } from './embed.js';
 import { wrArchImpact, wrCallers, wrCallees, wrExports, wrFind, wrFile, wrImpact, wrImporters, wrIndexStatus, wrSymbolFind, } from './tools.js';
 import { pyPackageRoot, venvPython } from '../utils/paths.js';
+import { getResult, putResult } from '../utils/cache.js';
 import path from 'node:path';
 const cfg = loadProjectConfig();
 const embedWorker = new EmbedWorker({
@@ -30,6 +31,9 @@ const embedWorker = new EmbedWorker({
     cohereApiKeyField: cfg.cohereApiKeyField,
 });
 const embed = (text) => embedWorker.embed(text);
+const rerank = (query, docs) => embedWorker.rerank(query, docs);
+const RERANK_DISABLED = process.env.WIDE_RESEARCHER_DISABLE_RERANK === '1';
+const rerankFn = RERANK_DISABLED ? undefined : rerank;
 /* ── Tool catalog ───────────────────────────────────────────────────── */
 const TOOLS = [
     {
@@ -176,13 +180,54 @@ const TOOLS = [
 function jsonContent(payload) {
     return { content: [{ type: 'text', text: JSON.stringify(payload, null, 2) }] };
 }
+let cachedPointsCount = null;
+let cachedPointsCountAt = 0;
+const POINTS_COUNT_TTL_MS = 30_000;
+/** Cached collection size used to invalidate result cache on index growth. */
+async function getPointsCount() {
+    const now = Date.now();
+    if (cachedPointsCount !== null && now - cachedPointsCountAt < POINTS_COUNT_TTL_MS) {
+        return cachedPointsCount;
+    }
+    try {
+        const info = await wrIndexStatus();
+        cachedPointsCount = info.points_count ?? 0;
+    }
+    catch {
+        cachedPointsCount = 0;
+    }
+    cachedPointsCountAt = now;
+    return cachedPointsCount;
+}
+async function withResultCache(cacheKey, compute) {
+    const pts = await getPointsCount();
+    const hit = getResult(cacheKey, pts);
+    if (hit) {
+        return { content: [{ type: 'text', text: hit }] };
+    }
+    const result = await compute();
+    const text = result.content[0]?.text;
+    if (typeof text === 'string')
+        putResult(cacheKey, pts, text);
+    return result;
+}
 const HANDLERS = {
-    wr_find: async (a) => jsonContent({
+    wr_find: async (a) => withResultCache({
+        tool: 'wr_find',
+        q: a.query ?? '',
+        k: a.k ?? 10,
+        lang: a.lang ?? null,
+        role: a.role ?? null,
+        layer: a.layer ?? null,
+        mode: a.mode ?? 'hybrid',
+        rerank: !RERANK_DISABLED,
+    }, async () => jsonContent({
         tool: 'wr_find',
         query: a.query,
         mode: a.mode ?? 'hybrid',
         results: await wrFind({
             embed,
+            rerank: rerankFn,
             query: a.query ?? '',
             k: a.k ?? 10,
             lang: a.lang ?? null,
@@ -190,14 +235,15 @@ const HANDLERS = {
             layer: a.layer ?? null,
             mode: a.mode ?? 'hybrid',
         }),
-    }),
+    })),
     wr_file: async (a) => {
         const chunks = await wrFile({ path: a.path ?? '' });
         return jsonContent({ tool: 'wr_file', path: a.path, count: chunks.length, chunks });
     },
-    wr_impact: async (a) => {
+    wr_impact: async (a) => withResultCache({ tool: 'wr_impact', d: a.description ?? '', k: a.k ?? 15, rerank: !RERANK_DISABLED }, async () => {
         const files = await wrImpact({
             embed,
+            rerank: rerankFn,
             description: a.description ?? '',
             k: a.k ?? 15,
         });
@@ -207,17 +253,25 @@ const HANDLERS = {
             count: files.length,
             files,
         });
-    },
-    wr_symbol_find: async (a) => {
+    }),
+    wr_symbol_find: async (a) => withResultCache({
+        tool: 'wr_symbol_find',
+        q: a.query ?? '',
+        k: a.k ?? 10,
+        kind: a.kind ?? null,
+        lang: a.lang ?? null,
+        rerank: !RERANK_DISABLED,
+    }, async () => {
         const results = await wrSymbolFind({
             embed,
+            rerank: rerankFn,
             query: a.query ?? '',
             k: a.k ?? 10,
             kind: a.kind ?? null,
             lang: a.lang ?? null,
         });
         return jsonContent({ tool: 'wr_symbol_find', query: a.query, count: results.length, results });
-    },
+    }),
     wr_callers: async (a) => {
         const results = await wrCallers({ symbol: a.symbol ?? '', k: a.k ?? 20 });
         return jsonContent({ tool: 'wr_callers', symbol: a.symbol, count: results.length, results });
@@ -234,10 +288,10 @@ const HANDLERS = {
         const result = await wrExports({ path: a.path ?? '', k: a.k ?? 100 });
         return jsonContent({ tool: 'wr_exports', path: a.path, ...result });
     },
-    wr_arch_impact: async (a) => {
-        const files = await wrArchImpact({ embed, description: a.description ?? '', k: a.k ?? 15 });
+    wr_arch_impact: async (a) => withResultCache({ tool: 'wr_arch_impact', d: a.description ?? '', k: a.k ?? 15, rerank: !RERANK_DISABLED }, async () => {
+        const files = await wrArchImpact({ embed, rerank: rerankFn, description: a.description ?? '', k: a.k ?? 15 });
         return jsonContent({ tool: 'wr_arch_impact', description: a.description, count: files.length, files });
-    },
+    }),
     wr_index_status: async () => jsonContent({ tool: 'wr_index_status', ...(await wrIndexStatus()) }),
 };
 /* ── Server wiring ──────────────────────────────────────────────────── */
