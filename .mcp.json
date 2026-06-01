@@ -1,0 +1,18 @@
+{
+  "mcpServers": {
+    "wide-researcher": {
+      "command": "node",
+      "args": [
+        "/root/.nvm/versions/node/v22.22.3/lib/node_modules/wide-researcher/bin/wide-researcher-mcp.js",
+        "--project-config",
+        "/var/www/wide-researcher/.wide-researcher/config.json"
+      ],
+      "env": {
+        "PYTHON_BIN": "/root/.wide-researcher/venv/bin/python",
+        "WR_LLM_BASE_URL": "https://api.minimax.io/anthropic",
+        "WR_LLM_API_KEY": "sk-cp-nqs60Hj946hUP-Z2eIpG3Kvhfh6_Mgz2xPnGFzKr6dO2whR45elLnqyPeYa8n5cX9HIdk16W_WzazFHOtPwWBoujBFoyDp0qt3CYqj9Y__9NELS0LnNCDzg",
+        "WR_LLM_MODEL": "MiniMax-M2.7-highspeed"
+      }
+    }
+  }
+}

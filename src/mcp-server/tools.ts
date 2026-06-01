@@ -40,6 +40,7 @@ interface SearchResult {
   end_line?: number;
   language?: string;
   role?: string | null;
+  runtime?: string | null;
   atomic_layer?: string | null;
   symbol_kind?: string | null;
   symbol_name?: string | null;
@@ -50,14 +51,32 @@ interface SearchResult {
   imported_files: string[];
   exports: string[];
   calls: string[];
+  call_arg_literals: string[];
+  storage_keys: string[];
   type_refs: string[];
   base_types: string[];
   implements: string[];
   references: string[];
   graph_text?: string;
+  callsite_text?: string;
   preview: string;
   code_lines: Array<{ line: number; text: string }>;
+  line_count: number;
+  content_chars: number;
   score: number | null;
+  retrieval_channels?: string[];
+  matched_terms?: string[];
+  match_reason?: string;
+  intent?: string | null;
+  warnings?: string[];
+  possible_false_positive?: boolean;
+  filter_relaxed?: boolean;
+}
+
+export interface CompactSearchResult extends Omit<SearchResult, 'code_lines'> {
+  snippet_lines?: Array<{ line: number; text: string }>;
+  omitted_lines?: number;
+  has_more_content: boolean;
 }
 
 /* ── helpers ────────────────────────────────────────────────────────── */
@@ -65,6 +84,7 @@ interface SearchResult {
 interface FilterOpts {
   language?: string | null;
   role?: string | null;
+  runtime?: string | null;
   atomic_layer?: string | null;
 }
 
@@ -72,6 +92,7 @@ function buildFilter(opts: FilterOpts): { must: Record<string, unknown>[] } | un
   const must: Record<string, unknown>[] = [];
   if (opts.language) must.push({ key: 'language', match: { value: opts.language } });
   if (opts.role) must.push({ key: 'role', match: { value: opts.role } });
+  if (opts.runtime) must.push({ key: 'runtime', match: { value: opts.runtime } });
   if (opts.atomic_layer) {
     must.push({ key: 'atomic_layer', match: { value: opts.atomic_layer } });
   }
@@ -82,10 +103,16 @@ function asStringArray(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((v): v is string => typeof v === 'string') : [];
 }
 
+function payloadText(p: Record<string, unknown>, key: string): string | undefined {
+  const value = p[key];
+  return typeof value === 'string' && value.length > 0 ? value : undefined;
+}
+
 function payloadToResult(point: QdrantPoint): SearchResult {
   const p = (point.payload ?? {}) as Record<string, unknown>;
   const content = typeof p.content === 'string' ? p.content : '';
   const startLine = typeof p.start_line === 'number' ? p.start_line : 1;
+  const lines = content.split(/\r?\n/);
   return {
     id: point.id,
     file_path: p.file_path as string | undefined,
@@ -93,6 +120,7 @@ function payloadToResult(point: QdrantPoint): SearchResult {
     end_line: p.end_line as number | undefined,
     language: p.language as string | undefined,
     role: (p.role as string | null) ?? null,
+    runtime: (p.runtime as string | null) ?? null,
     atomic_layer: (p.atomic_layer as string | null) ?? null,
     symbol_kind: (p.symbol_kind as string | null) ?? null,
     symbol_name: (p.symbol_name as string | null) ?? null,
@@ -103,17 +131,39 @@ function payloadToResult(point: QdrantPoint): SearchResult {
     imported_files: asStringArray(p.imported_files),
     exports: asStringArray(p.exports),
     calls: asStringArray(p.calls),
+    call_arg_literals: asStringArray(p.call_arg_literals),
+    storage_keys: asStringArray(p.storage_keys),
     type_refs: asStringArray(p.type_refs),
     base_types: asStringArray(p.base_types),
     implements: asStringArray(p.implements),
     references: asStringArray(p.references),
-    graph_text: typeof p.graph_text === 'string' ? p.graph_text : undefined,
+    graph_text: payloadText(p, 'graph_text'),
+    callsite_text: payloadText(p, 'callsite_text'),
     preview: content.slice(0, 500),
-    code_lines: content.split(/\r?\n/).map((text, idx) => ({
+    code_lines: lines.map((text, idx) => ({
       line: startLine + idx,
       text,
     })),
+    line_count: lines.length,
+    content_chars: content.length,
     score: point.score ?? null,
+  };
+}
+
+export function compactSearchResult(row: SearchResult, snippetLines = 20, includeCodeLines = false): SearchResult | CompactSearchResult {
+  const hasMore = row.code_lines.length > snippetLines;
+  if (includeCodeLines) {
+    return {
+      ...row,
+      has_more_content: false,
+    } as SearchResult & { has_more_content: boolean };
+  }
+  const { code_lines: codeLines, ...rest } = row;
+  return {
+    ...rest,
+    snippet_lines: codeLines.slice(0, Math.max(0, snippetLines)),
+    omitted_lines: Math.max(0, codeLines.length - snippetLines),
+    has_more_content: hasMore,
   };
 }
 
@@ -204,8 +254,18 @@ async function rerankRows(
   if (!rerank || rows.length === 0) return rows;
   const docs = rows.map((r) => {
     const widened = (r as SearchResult & { _rerank_text?: string })._rerank_text;
-    if (widened && widened.length > 0) return widened;
-    return r.code_lines.map((l) => l.text).join('\n').slice(0, 4000);
+    const body = widened && widened.length > 0 ? widened : r.code_lines.map((l) => l.text).join('\n').slice(0, 4000);
+    const meta = [
+      r.file_path ? `path: ${r.file_path}` : '',
+      r.language ? `language: ${r.language}` : '',
+      r.role ? `role: ${r.role}` : '',
+      r.runtime ? `runtime: ${r.runtime}` : '',
+      r.atomic_layer ? `layer: ${r.atomic_layer}` : '',
+      r.symbol_name ? `symbol: ${r.symbol_name}` : '',
+      r.graph_text ? `graph: ${r.graph_text}` : '',
+      r.callsite_text ? `callsites: ${r.callsite_text}` : '',
+    ].filter(Boolean).join('\n');
+    return `${meta}\n\n${body}`.slice(0, 5000);
   });
   let scores: number[];
   try {
@@ -254,6 +314,65 @@ interface ModeOpts {
 
 const FUSION_MULTIPLIER = 6;
 
+function queryTokens(query: string): string[] {
+  return [...new Set(query
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .toLowerCase()
+    .split(/[^a-z0-9_.$-]+/)
+    .filter((t) => t.length >= 2))];
+}
+
+function classifyIntent(query: string): string | null {
+  const q = query.toLowerCase();
+  if (/\b(localstorage|sessionstorage|indexeddb|cookie|storage key|browser storage|atomwithstorage|getitem|setitem|removeitem)\b/.test(q)) {
+    return 'browser_storage';
+  }
+  return null;
+}
+
+function annotateSearchRows(rows: SearchResult[], query: string): SearchResult[] {
+  const intent = classifyIntent(query);
+  const tokens = queryTokens(query);
+  return rows.map((row) => {
+    const haystack = [
+      row.file_path,
+      row.symbol_name,
+      row.graph_text,
+      row.callsite_text,
+      ...row.calls,
+      ...row.call_arg_literals,
+      ...row.storage_keys,
+      row.preview,
+    ].filter(Boolean).join(' ').toLowerCase();
+    const matched = tokens.filter((t) => haystack.includes(t));
+    const warnings: string[] = [];
+    let possibleFalsePositive = false;
+    let score = row.score ?? 0;
+    if (intent === 'browser_storage') {
+      const browserish = row.runtime === 'browser' || row.role === 'frontend' || row.language === 'tsx' || row.storage_keys.length > 0;
+      const backendish = row.runtime === 'dotnet' || row.runtime === 'node' || row.role === 'backend' || row.language === 'csharp';
+      if (browserish) score += 0.2;
+      if (backendish && row.storage_keys.length === 0) {
+        score -= 0.25;
+        possibleFalsePositive = true;
+        warnings.push(`${row.language ?? row.runtime ?? 'result'} mismatches inferred browser-storage intent`);
+      }
+      if (!matched.some((t) => ['localstorage', 'sessionstorage', 'indexeddb', 'cookie', 'storage', 'atomwithstorage', 'getitem', 'setitem', 'removeitem'].includes(t))) {
+        warnings.push('no direct browser-storage token matched');
+      }
+    }
+    return {
+      ...row,
+      score,
+      intent,
+      matched_terms: matched,
+      match_reason: matched.length ? `matched ${matched.slice(0, 5).join(', ')}` : 'semantic-only or graph-neighbor match',
+      warnings,
+      possible_false_positive: possibleFalsePositive,
+    };
+  }).sort((a, b) => (b.score ?? 0) - (a.score ?? 0));
+}
+
 async function searchSemantic(opts: ModeOpts): Promise<SearchResult[]> {
   const vec = await opts.embed(opts.queryText);
   const fetchK = opts.rerank ? Math.max(opts.top_k * FUSION_MULTIPLIER, 40) : opts.top_k;
@@ -273,10 +392,9 @@ async function searchKeyword(
 ): Promise<SearchResult[]> {
   const must: Record<string, unknown>[] = [
     { key: 'content', match: { text: opts.queryText } },
+    ...(opts.filter?.must ?? []),
   ];
   const fetchK = opts.rerank ? Math.max(opts.top_k * FUSION_MULTIPLIER, 40) : opts.top_k;
-  // keyword mode ignores role/atomic_layer — they were indexed inconsistently
-  // (null in Qdrant, correct values in metadata) and filtering causes false negatives
   const res = (await qdrant.scroll(COLLECTION, {
     filter: { must },
     limit: fetchK,
@@ -286,6 +404,7 @@ async function searchKeyword(
   const rows = (res.points ?? []).map((pt) => ({
     ...payloadToResult(pt),
     score: 1.0,
+    retrieval_channels: ['keyword'],
   }));
   return finalizeSearch(opts as ModeOpts, rows);
 }
@@ -294,23 +413,22 @@ async function searchHybrid(opts: ModeOpts): Promise<SearchResult[]> {
   const vec = await opts.embed(opts.queryText);
   const keywordMust: Record<string, unknown>[] = [
     { key: 'content', match: { text: opts.queryText } },
+    ...(opts.filter?.must ?? []),
   ];
-  // Filter semantic prefetch to language only — role/atomic_layer are null in DB
-  // due to incomplete re-indexing, so filtering on them causes false negatives.
-  const semanticFilter = opts.filter
-    ? { must: opts.filter.must.filter(f => f.key === 'language') }
-    : undefined;
   const fetchK = opts.rerank ? Math.max(opts.top_k * FUSION_MULTIPLIER, 40) : opts.top_k;
   const res = (await qdrant.query(COLLECTION, {
     prefetch: [
-      { query: vec, using: '', limit: fetchK, filter: semanticFilter },
+      { query: vec, using: '', limit: fetchK, filter: opts.filter },
       { filter: { must: keywordMust }, limit: fetchK },
     ],
     query: { fusion: 'rrf' },
     limit: fetchK,
     with_payload: true,
   })) as { points?: QdrantPoint[] };
-  const rows = (res.points ?? []).map(payloadToResult);
+  const rows = (res.points ?? []).map((pt) => ({
+    ...payloadToResult(pt),
+    retrieval_channels: ['hybrid'],
+  }));
   return finalizeSearch(opts, rows);
 }
 
@@ -326,6 +444,7 @@ async function finalizeSearch(opts: ModeOpts, rows: SearchResult[]): Promise<Sea
     working = await expandWindows(working);
     working = await rerankRows(opts.rerank, opts.queryText, working, opts.top_k * 2);
   }
+  working = annotateSearchRows(working, opts.queryText);
   if (opts.diversify !== false) {
     working = diversifyByFile(working, opts.perFileCap ?? PER_FILE_CAP_DEFAULT);
   }
@@ -371,6 +490,7 @@ export interface FindOpts {
   k?: number;
   lang?: string | null;
   role?: string | null;
+  runtime?: string | null;
   layer?: string | null;
   mode?: 'semantic' | 'keyword' | 'hybrid';
   diversify?: boolean;
@@ -383,6 +503,7 @@ export async function wrFind(opts: FindOpts): Promise<SearchResult[]> {
   const filter = buildFilter({
     language: opts.lang,
     role: opts.role,
+    runtime: opts.runtime,
     atomic_layer: opts.layer,
   });
 
@@ -410,20 +531,42 @@ export interface FileChunk {
   symbol_name: string | null;
   language: string;
   role: string | null;
-  content: string;
+  runtime: string | null;
+  content?: string;
+  preview?: string;
+  content_chars: number;
+  line_count: number;
 }
 
-export async function wrFile(opts: { path: string }): Promise<FileChunk[]> {
+export interface FileResult {
+  chunks: FileChunk[];
+  next_offset: number | null;
+  returned: number;
+  content_mode: 'none' | 'preview' | 'full';
+}
+
+export async function wrFile(opts: {
+  path: string;
+  offset?: number;
+  limit?: number;
+  contentMode?: 'none' | 'preview' | 'full';
+  maxChars?: number;
+}): Promise<FileResult> {
+  const offset = Math.max(0, opts.offset ?? 0);
+  const limit = Math.min(Math.max(1, opts.limit ?? 20), 100);
+  const contentMode = opts.contentMode ?? 'preview';
+  const maxChars = Math.max(200, opts.maxChars ?? 2000);
   const res = (await qdrant.scroll(COLLECTION, {
     filter: { must: [{ key: 'file_path', match: { value: opts.path } }] },
     limit: 1000,
     with_payload: true,
     with_vector: false,
   })) as { points?: QdrantPoint[] };
-  return (res.points ?? [])
+  const all = (res.points ?? [])
     .map((pt) => {
       const p = (pt.payload ?? {}) as Record<string, unknown>;
-      return {
+      const content = (p.content as string) ?? '';
+      const base: FileChunk = {
         id: pt.id,
         chunk_index: (p.chunk_index as number) ?? 0,
         start_line: (p.start_line as number) ?? 0,
@@ -432,10 +575,18 @@ export async function wrFile(opts: { path: string }): Promise<FileChunk[]> {
         symbol_name: (p.symbol_name as string | null) ?? null,
         language: (p.language as string) ?? 'text',
         role: (p.role as string | null) ?? null,
-        content: (p.content as string) ?? '',
+        runtime: (p.runtime as string | null) ?? null,
+        content_chars: content.length,
+        line_count: content ? content.split(/\r?\n/).length : 0,
       };
+      if (contentMode === 'full') base.content = content.slice(0, maxChars);
+      if (contentMode === 'preview') base.preview = content.slice(0, Math.min(maxChars, 1000));
+      return base;
     })
     .sort((a, b) => a.chunk_index - b.chunk_index);
+  const chunks = all.slice(offset, offset + limit);
+  const nextOffset = offset + chunks.length < all.length ? offset + chunks.length : null;
+  return { chunks, next_offset: nextOffset, returned: chunks.length, content_mode: contentMode };
 }
 
 export interface SymbolSearchResult {
@@ -561,6 +712,68 @@ export async function wrCallees(opts: { symbolOrFile: string; k?: number }): Pro
   }));
   const calls = [...new Set(chunks.flatMap((chunk) => chunk.calls))];
   return { calls, chunks };
+}
+
+export interface CallArgResult {
+  file_path?: string;
+  line?: number;
+  callee?: string;
+  compact_callee?: string;
+  arg_index?: number;
+  literal?: string;
+  literal_type?: string;
+  symbol_name?: string | null;
+  code_span?: string;
+}
+
+export async function wrCallArgs(opts: {
+  callee?: string | null;
+  argIndex?: number | null;
+  literal?: string | null;
+  lang?: string | null;
+  path?: string | null;
+  k?: number;
+}): Promise<CallArgResult[]> {
+  const must: Record<string, unknown>[] = [];
+  if (opts.path) must.push({ key: 'file_path', match: { value: opts.path } });
+  if (opts.lang) must.push({ key: 'language', match: { value: opts.lang } });
+  if (opts.literal) must.push({ key: 'call_arg_literals', match: { value: opts.literal } });
+  if (opts.callee) must.push({ key: 'calls', match: { value: symbolName(opts.callee) } });
+  const points = await scrollCollection(COLLECTION, must.length ? { must } : { must: [{ key: 'callsite_text', match: { text: opts.callee ?? opts.literal ?? '' } }] }, Math.min(opts.k ?? 50, 200));
+  const out: CallArgResult[] = [];
+  for (const pt of points) {
+    const p = (pt.payload ?? {}) as Record<string, unknown>;
+    const sites = Array.isArray(p.call_sites) ? p.call_sites as Record<string, unknown>[] : [];
+    for (const site of sites) {
+      const compact = typeof site.compact_callee === 'string' ? site.compact_callee : undefined;
+      if (opts.callee && compact !== symbolName(opts.callee)) continue;
+      const maps = Array.isArray(site.arg_literal_map) ? site.arg_literal_map as Record<string, unknown>[] : [];
+      for (const m of maps) {
+        const argIndex = typeof m.arg_index === 'number' ? m.arg_index : undefined;
+        const literal = typeof m.literal === 'string' ? m.literal : undefined;
+        if (opts.argIndex !== undefined && opts.argIndex !== null && argIndex !== opts.argIndex) continue;
+        if (opts.literal && literal !== opts.literal) continue;
+        out.push({
+          file_path: p.file_path as string | undefined,
+          line: typeof site.line === 'number' ? site.line : undefined,
+          callee: site.callee as string | undefined,
+          compact_callee: compact,
+          arg_index: argIndex,
+          literal,
+          literal_type: m.literal_type as string | undefined,
+          symbol_name: (p.symbol_name as string | null) ?? null,
+          code_span: site.code_span as string | undefined,
+        });
+      }
+    }
+  }
+  const seen = new Set<string>();
+  return out.filter((row) => {
+    const key = `${row.file_path}:${row.line}:${row.compact_callee}:${row.arg_index}:${row.literal}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  }).slice(0, opts.k ?? 50);
 }
 
 export async function wrImporters(opts: { pathOrModule: string; k?: number }): Promise<SearchResult[]> {

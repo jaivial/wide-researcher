@@ -8,7 +8,8 @@
             └─────────────────┬────────────────────────────┘
                               │ MCP tool call:
                               │   wr_find / wr_file /
-                              │   wr_impact / wr_index_status
+                              │   wr_call_args / wr_impact /
+                              │   wr_index_status
                               ▼
                ┌──────────────────────────────────┐
                │  wide-researcher-mcp (Node)      │
@@ -49,6 +50,27 @@
                               ▼
                          (Qdrant above)
 ```
+
+## MCP result shaping and literal enumeration
+
+MCP responses are compact by default. `wr_find` returns bounded snippets,
+line/content counts, match reasons, and warning metadata instead of full
+chunk bodies. Use `include_code_lines=true` or paginated `wr_file` only
+for targeted follow-up reads. The server applies a final serialized byte
+budget (`WIDE_RESEARCHER_MAX_RESPONSE_BYTES`, default 64 KiB) so a broad
+query cannot flood the client with tens of thousands of lines.
+
+Use the tools by intent:
+
+- `wr_impact` / `wr_find` — first-pass targeting and discovery.
+- `wr_call_args` — precise literal argument enumeration, e.g.
+  `callee=atomWithStorage argIndex=0` for storage-key discovery.
+- `wr_file` — paginated chunk inspection after a file has been located.
+
+TypeScript/TSX indexing records call-site literals in chunk payloads:
+`call_arg_literals`, `storage_keys`, `call_sites`, and `callsite_text`.
+This makes multi-line calls searchable without relying on oversized code
+snippets or shell grep.
 
 ## Three running processes
 
@@ -134,7 +156,7 @@ save. Trade-off: ~1 s import overhead per re-embed.
 ### `systemd --user` (not system-wide)
 
 - No root required.
-- Resource caps (`CPUQuota=200%`, `MemoryMax=2G`) apply per-user.
+- Resource caps (`CPUQuota=200%`, `MemoryMax=4G`) apply per-user.
 - Logs go to the user's journal, not the system journal.
 - Survives logout (with `loginctl enable-linger`); doesn't survive
   reboot unless lingering is enabled (which is fine — Qdrant

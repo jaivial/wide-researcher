@@ -65,6 +65,9 @@ EXCLUDE_DIR_NAMES = {
     ".storybook-cache",
     ".wide-researcher",  # don't index our own sidecar
     "screenshots",         # qa / debug screenshots
+    "logs",
+    "sessions",
+    "pastes",
 }
 EXCLUDE_DIR_NAMES.update(EXTRA_EXCLUDE_DIR_NAMES)
 
@@ -108,6 +111,11 @@ EXCLUDE_FILE_PATTERNS = [
     _re.compile(r"\.tsbuildinfo$"),
     # Backup files (dead code, previous versions)
     _re.compile(r"\.backup\d*$"),
+    # Runtime logs/session captures are generated data, not source.
+    _re.compile(r"\.log$"),
+    _re.compile(r"\.log\.\d+$"),
+    _re.compile(r"^session_.*\.json$"),
+    _re.compile(r"^request_dump_.*\.json$"),
 ]
 for extra in EXTRA_EXCLUDE_FILE_PATTERNS:
     try:

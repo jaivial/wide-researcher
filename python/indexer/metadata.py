@@ -37,9 +37,38 @@ def _detect_atomic_layer(abs_path: str) -> str | None:
     return None
 
 
+def _is_backend_path(abs_path: str) -> bool:
+    parts = {p.lower() for p in abs_path.split(os.sep)}
+    backend_parts = {
+        "server", "mcp-server", "api", "routes", "controllers", "middleware",
+        "services", "models", "bin", "cli", "workers", "signalr",
+    }
+    return bool(parts & backend_parts)
+
+
+def _detect_runtime(abs_path: str, language: str) -> str:
+    if language == "markdown":
+        return "docs"
+    if language == "csharp":
+        return "dotnet"
+    if language == "python":
+        return "python"
+    if language in ("go", "rust"):
+        return "native"
+    if language in ("typescript", "tsx", "javascript", "jsx"):
+        if _is_backend_path(abs_path) or abs_path.endswith(".config.ts"):
+            return "node"
+        if language in ("tsx", "jsx"):
+            return "browser"
+        parts = {p.lower() for p in abs_path.split(os.sep)}
+        if parts & {"components", "pages", "hooks", "atoms", "ui", "layouts"}:
+            return "browser"
+        return "node"
+    return "unknown"
+
+
 def _detect_role(abs_path: str, language: str) -> str:
-    """Best-effort role tag (frontend / backend / docs / tests / config).
-    Used by `wr_impact` to suggest candidate specialists."""
+    """Best-effort role tag (frontend / backend / docs / tests / config)."""
     fn = os.path.basename(abs_path)
     parts = abs_path.split(os.sep)
 
@@ -57,9 +86,10 @@ def _detect_role(abs_path: str, language: str) -> str:
         "go.mod", "Gemfile", "Dockerfile",
     ):
         return "config"
-    if language in ("typescript", "tsx", "css"):
+    runtime = _detect_runtime(abs_path, language)
+    if runtime == "browser" or language == "css":
         return "frontend"
-    if language in ("csharp", "python", "go", "rust"):
+    if runtime in ("node", "dotnet", "python", "native") or language in ("csharp", "python", "go", "rust"):
         return "backend"
     return "other"
 
@@ -93,6 +123,7 @@ def derive_metadata(abs_path: str, repo: str, language: str) -> dict:
     return {
         "atomic_layer": _detect_atomic_layer(abs_path),
         "role": _detect_role(abs_path, language),
+        "runtime": _detect_runtime(abs_path, language),
         "is_test": _is_test(abs_path),
         "is_story": _is_story(abs_path),
         "route_owner": _route_owner(abs_path),

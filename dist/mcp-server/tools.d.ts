@@ -7,6 +7,7 @@ interface SearchResult {
     end_line?: number;
     language?: string;
     role?: string | null;
+    runtime?: string | null;
     atomic_layer?: string | null;
     symbol_kind?: string | null;
     symbol_name?: string | null;
@@ -17,18 +18,39 @@ interface SearchResult {
     imported_files: string[];
     exports: string[];
     calls: string[];
+    call_arg_literals: string[];
+    storage_keys: string[];
     type_refs: string[];
     base_types: string[];
     implements: string[];
     references: string[];
     graph_text?: string;
+    callsite_text?: string;
     preview: string;
     code_lines: Array<{
         line: number;
         text: string;
     }>;
+    line_count: number;
+    content_chars: number;
     score: number | null;
+    retrieval_channels?: string[];
+    matched_terms?: string[];
+    match_reason?: string;
+    intent?: string | null;
+    warnings?: string[];
+    possible_false_positive?: boolean;
+    filter_relaxed?: boolean;
 }
+export interface CompactSearchResult extends Omit<SearchResult, 'code_lines'> {
+    snippet_lines?: Array<{
+        line: number;
+        text: string;
+    }>;
+    omitted_lines?: number;
+    has_more_content: boolean;
+}
+export declare function compactSearchResult(row: SearchResult, snippetLines?: number, includeCodeLines?: boolean): SearchResult | CompactSearchResult;
 export interface FindOpts {
     embed: EmbedFn;
     rerank?: RerankFn;
@@ -36,6 +58,7 @@ export interface FindOpts {
     k?: number;
     lang?: string | null;
     role?: string | null;
+    runtime?: string | null;
     layer?: string | null;
     mode?: 'semantic' | 'keyword' | 'hybrid';
     diversify?: boolean;
@@ -51,11 +74,25 @@ export interface FileChunk {
     symbol_name: string | null;
     language: string;
     role: string | null;
-    content: string;
+    runtime: string | null;
+    content?: string;
+    preview?: string;
+    content_chars: number;
+    line_count: number;
+}
+export interface FileResult {
+    chunks: FileChunk[];
+    next_offset: number | null;
+    returned: number;
+    content_mode: 'none' | 'preview' | 'full';
 }
 export declare function wrFile(opts: {
     path: string;
-}): Promise<FileChunk[]>;
+    offset?: number;
+    limit?: number;
+    contentMode?: 'none' | 'preview' | 'full';
+    maxChars?: number;
+}): Promise<FileResult>;
 export interface SymbolSearchResult {
     id: string | number;
     node_id?: string;
@@ -96,6 +133,25 @@ export declare function wrCallees(opts: {
     calls: string[];
     chunks: SearchResult[];
 }>;
+export interface CallArgResult {
+    file_path?: string;
+    line?: number;
+    callee?: string;
+    compact_callee?: string;
+    arg_index?: number;
+    literal?: string;
+    literal_type?: string;
+    symbol_name?: string | null;
+    code_span?: string;
+}
+export declare function wrCallArgs(opts: {
+    callee?: string | null;
+    argIndex?: number | null;
+    literal?: string | null;
+    lang?: string | null;
+    path?: string | null;
+    k?: number;
+}): Promise<CallArgResult[]>;
 export declare function wrImporters(opts: {
     pathOrModule: string;
     k?: number;

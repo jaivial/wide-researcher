@@ -136,16 +136,67 @@ MAX_RSS_MB: int = int(_cfg.get("max_rss_mb", 0))
 CHUNK_CAP: int = int(_cfg.get("chunk_cap", 500))
 
 
+def _cgroup_file_candidates(filename: str) -> list[Path]:
+    candidates: list[Path] = []
+    try:
+        for line in Path("/proc/self/cgroup").read_text(encoding="utf-8").splitlines():
+            parts = line.split(":")
+            if len(parts) != 3:
+                continue
+            hierarchy, controllers, rel_path = parts
+            rel = rel_path.lstrip("/")
+            if hierarchy == "0":
+                candidates.append(Path("/sys/fs/cgroup") / rel / filename)
+            elif "memory" in controllers.split(","):
+                candidates.append(Path("/sys/fs/cgroup/memory") / rel / filename)
+    except OSError:
+        pass
+    candidates.append(Path("/sys/fs/cgroup") / filename)
+    candidates.append(Path("/sys/fs/cgroup/memory") / filename)
+    return candidates
+
+
+def _read_cgroup_memory_limit_mb() -> int | None:
+    """Return the cgroup memory ceiling in MB when the process has one."""
+    candidates = _cgroup_file_candidates("memory.max") + _cgroup_file_candidates(
+        "memory.limit_in_bytes"
+    )
+    for path in candidates:
+        try:
+            raw = path.read_text(encoding="utf-8").strip()
+        except OSError:
+            continue
+        if not raw or raw == "max":
+            continue
+        try:
+            limit_bytes = int(raw)
+        except ValueError:
+            continue
+        # Some cgroup v1 hosts report a sentinel that is larger than real RAM.
+        if limit_bytes <= 0 or limit_bytes >= 1 << 60:
+            continue
+        return limit_bytes // (1024 * 1024)
+    return None
+
+
 def _detect_max_rss_mb() -> int:
-    """Auto-detect: 80% of total physical RAM."""
+    """Auto-detect: 80% of the effective memory ceiling."""
+    physical_mb: int | None = None
     try:
         with open("/proc/meminfo", encoding="utf-8") as f:
             for line in f:
                 if line.startswith("MemTotal:"):
                     total_kb = int(line.split()[1])
-                    return int(total_kb / 1024 * 0.8)
+                    physical_mb = int(total_kb / 1024)
+                    break
     except Exception:
         pass
+
+    cgroup_mb = _read_cgroup_memory_limit_mb()
+    limits = [v for v in (physical_mb, cgroup_mb) if v and v > 0]
+    if limits:
+        return int(min(limits) * 0.8)
+
     try:
         import psutil  # type: ignore[import-not-found]
         return int(psutil.virtual_memory().total / (1024 * 1024) * 0.8)

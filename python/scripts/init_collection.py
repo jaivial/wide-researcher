@@ -122,6 +122,8 @@ def ensure_indexes():
     for field in (
         "repo",
         "language",
+        "role",
+        "runtime",
         "agent_owner",
         "atomic_layer",
         "file_path",
@@ -139,6 +141,8 @@ def ensure_indexes():
         "base_types",
         "implements",
         "references",
+        "call_arg_literals",
+        "storage_keys",
         "symbol_index_version",
         "symbol_index_hash",
     ):
@@ -156,7 +160,7 @@ def ensure_indexes():
                 print(f"  index {field} FAILED: {e}")
 
     # Text indexes — built-in BM25-like full-text search
-    for field in ("content", "symbol_name", "graph_text"):
+    for field in ("content", "symbol_name", "graph_text", "callsite_text"):
         try:
             client.create_payload_index(
                 collection_name=COLL,

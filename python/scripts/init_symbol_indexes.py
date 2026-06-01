@@ -23,10 +23,12 @@ KEYWORD_FIELDS = (
     "base_types",
     "implements",
     "references",
+    "call_arg_literals",
+    "storage_keys",
     "symbol_index_version",
     "symbol_index_hash",
 )
-TEXT_FIELDS = ("graph_text",)
+TEXT_FIELDS = ("graph_text", "callsite_text")
 
 
 def ensure_symbol_payload_indexes(collection_name: str = QDRANT_COLLECTION) -> None:

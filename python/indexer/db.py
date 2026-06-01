@@ -125,7 +125,7 @@ def build_chunk_payload(
         "content": ch.content,
         "content_tokens": ch.content_tokens,
     }
-    for k in ("role", "atomic_layer", "is_test", "is_story", "route_owner"):
+    for k in ("role", "runtime", "atomic_layer", "is_test", "is_story", "route_owner"):
         if k in meta:
             payload[k] = meta[k]
     if symbol_payloads is not None:

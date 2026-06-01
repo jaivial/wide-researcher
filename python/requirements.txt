@@ -8,3 +8,4 @@ tqdm>=4.66
 watchdog>=4.0,<5
 requests>=2.31,<3
 cohere>=5.13,<6
+openai>=1.50,<3

@@ -16,7 +16,7 @@ from .symbol_resolver import (
     unique,
     walk_nodes,
 )
-from .symbol_types import EdgeRecord, FileGraphRecord, SymbolRecord
+from .symbol_types import CallSiteRecord, EdgeRecord, FileGraphRecord, SymbolRecord
 
 _DECL_TYPES = {
     "function_declaration": "function",
@@ -62,6 +62,12 @@ def extract_ts_graph(repo: str, file_path: str, file_hash: str, language: str, s
                 record.calls.append(target)
                 record.references.append(target)
                 record.edges.append(EdgeRecord("calls", source_id, target, file_path, line, "medium"))
+                call_site = _call_site_record(node, target, file_path, line, source_id, source)
+                if call_site:
+                    record.call_sites.append(call_site)
+                    record.call_arg_literals.extend(call_site.arg_literals)
+                    if target in {"atomWithStorage", "localStorage.setItem", "localStorage.getItem", "localStorage.removeItem", "sessionStorage.setItem", "sessionStorage.getItem", "sessionStorage.removeItem"} and call_site.arg_literals:
+                        record.storage_keys.append(call_site.arg_literals[0])
         elif node.type in _TYPE_REF_NODES:
             name = compact_name(node_text(node))
             if name and not _BUILTIN_TYPE_RE.match(name):
@@ -78,6 +84,8 @@ def extract_ts_graph(repo: str, file_path: str, file_hash: str, language: str, s
     record.imported_files = unique(record.imported_files)
     record.exports = unique(record.exports)
     record.calls = unique(record.calls)
+    record.call_arg_literals = unique(record.call_arg_literals)
+    record.storage_keys = unique(record.storage_keys)
     record.type_refs = unique(record.type_refs)
     record.base_types = unique(record.base_types)
     record.implements = unique(record.implements)
@@ -179,6 +187,71 @@ def _callee_name(node) -> str | None:
         if child.type in ("identifier", "member_expression", "subscript_expression", "call_expression"):
             return node_text(child)
     return None
+
+
+def _arguments_node(node):
+    for child in node.children:
+        if child.type == "arguments":
+            return child
+    return None
+
+
+def _direct_arguments(node) -> list:
+    args = _arguments_node(node)
+    if args is None:
+        return []
+    return [child for child in args.children if child.type not in ("(", ")", ",")]
+
+
+def _literal_value(node) -> tuple[str, str] | None:
+    current = node
+    while current.type in ("parenthesized_expression", "as_expression", "satisfies_expression", "non_null_expression") and current.children:
+        candidates = [c for c in current.children if c.type not in ("(", ")", "as", "satisfies", "!")]
+        if not candidates:
+            break
+        current = candidates[0]
+    text = node_text(current).strip()
+    if current.type in ("string", "string_fragment"):
+        return text.strip("'\""), "string"
+    if current.type == "template_string":
+        if "${" in text:
+            return None
+        return text.strip("`") , "template"
+    if current.type == "number":
+        return text, "number"
+    if current.type in ("true", "false"):
+        return text, "boolean"
+    if current.type == "null":
+        return text, "null"
+    return None
+
+
+def _call_site_record(node, target: str, file_path: str, line: int, source_id: str, source: str) -> CallSiteRecord | None:
+    arg_literals: list[str] = []
+    arg_literal_map: list[dict] = []
+    for idx, arg in enumerate(_direct_arguments(node)):
+        literal = _literal_value(arg)
+        if literal is None:
+            continue
+        value, kind = literal
+        if not value:
+            continue
+        arg_literals.append(value)
+        arg_literal_map.append({"arg_index": idx, "literal": value, "literal_type": kind})
+    if not arg_literal_map:
+        return None
+    start = node.start_point[0] + 1
+    end = min(node.end_point[0] + 1, start + 5)
+    return CallSiteRecord(
+        callee=_callee_name(node) or target,
+        compact_callee=target,
+        file_path=file_path,
+        line=line,
+        source=source_id,
+        arg_literals=unique(arg_literals),
+        arg_literal_map=arg_literal_map,
+        code_span=_signature(line_slice(source, start, end)),
+    )
 
 
 def _jsx_name(node) -> str | None:

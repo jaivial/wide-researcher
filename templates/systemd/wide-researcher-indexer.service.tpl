@@ -17,7 +17,7 @@ RestartSec=3
 
 # Resource caps — watcher spawns subprocesses, so cap conservatively.
 CPUQuota=200%
-MemoryMax=2G
+MemoryMax=4G
 TasksMax=512
 
 StandardOutput=append:{{LOG_DIR}}/indexer-{{PROJECT_SLUG}}.log

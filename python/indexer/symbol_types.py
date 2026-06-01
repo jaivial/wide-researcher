@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-SYMBOL_INDEX_VERSION = "1"
+SYMBOL_INDEX_VERSION = "2"
 
 
 @dataclass
@@ -46,6 +46,30 @@ class EdgeRecord:
 
 
 @dataclass
+class CallSiteRecord:
+    callee: str
+    compact_callee: str
+    file_path: str
+    line: int
+    source: str
+    arg_literals: list[str] = field(default_factory=list)
+    arg_literal_map: list[dict[str, Any]] = field(default_factory=list)
+    code_span: str = ""
+
+    def to_payload(self) -> dict[str, Any]:
+        return {
+            "callee": self.callee,
+            "compact_callee": self.compact_callee,
+            "file_path": self.file_path,
+            "line": self.line,
+            "source": self.source,
+            "arg_literals": self.arg_literals,
+            "arg_literal_map": self.arg_literal_map,
+            "code_span": self.code_span,
+        }
+
+
+@dataclass
 class FileGraphRecord:
     repo: str
     file_path: str
@@ -57,6 +81,9 @@ class FileGraphRecord:
     imported_files: list[str] = field(default_factory=list)
     exports: list[str] = field(default_factory=list)
     calls: list[str] = field(default_factory=list)
+    call_sites: list[CallSiteRecord] = field(default_factory=list)
+    call_arg_literals: list[str] = field(default_factory=list)
+    storage_keys: list[str] = field(default_factory=list)
     type_refs: list[str] = field(default_factory=list)
     base_types: list[str] = field(default_factory=list)
     implements: list[str] = field(default_factory=list)
@@ -68,6 +95,9 @@ class FileGraphRecord:
         declared_symbols = _unique([s.name for s in local_symbols])
         declared_symbol_ids = _unique([s.id for s in local_symbols])
         calls = _unique([e.target for e in local_edges if e.kind == "calls"])
+        local_call_sites = [c for c in self.call_sites if start_line <= c.line <= end_line]
+        call_arg_literals = _unique([lit for c in local_call_sites for lit in c.arg_literals])
+        storage_keys = _unique([lit for c in local_call_sites if c.compact_callee in {"atomWithStorage", "localStorage.setItem", "localStorage.getItem", "localStorage.removeItem", "sessionStorage.setItem", "sessionStorage.getItem", "sessionStorage.removeItem"} for lit in c.arg_literals[:1]])
         type_refs = _unique([e.target for e in local_edges if e.kind == "type_ref"])
         base_types = _unique([e.target for e in local_edges if e.kind == "extends"])
         implements = _unique([e.target for e in local_edges if e.kind == "implements"])
@@ -89,6 +119,10 @@ class FileGraphRecord:
             graph_parts.append("imports " + " ".join(imports[:12]))
         if exports:
             graph_parts.append("exports " + " ".join(exports[:12]))
+        if call_arg_literals:
+            graph_parts.append("call_args " + " ".join(call_arg_literals[:20]))
+        if storage_keys:
+            graph_parts.append("storage_keys " + " ".join(storage_keys[:20]))
         if type_refs:
             graph_parts.append("types " + " ".join(type_refs[:20]))
         if base_types:
@@ -106,6 +140,14 @@ class FileGraphRecord:
             "imported_files": self.imported_files if imports else [],
             "exports": exports,
             "calls": calls,
+            "call_arg_literals": call_arg_literals,
+            "storage_keys": storage_keys,
+            "call_sites": [c.to_payload() for c in local_call_sites[:50]],
+            "callsite_text": "; ".join(
+                f"{c.compact_callee}[{m.get('arg_index')}]={m.get('literal')}"
+                for c in local_call_sites[:50]
+                for m in c.arg_literal_map[:8]
+            ),
             "type_refs": type_refs,
             "base_types": base_types,
             "implements": implements,

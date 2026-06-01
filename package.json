@@ -1,6 +1,6 @@
 {
   "name": "wide-researcher",
-  "version": "0.1.0-alpha.27",
+  "version": "0.1.0-alpha.28",
   "description": "Qdrant-backed semantic code-search, AST/symbol graph search, and impact-radius diagrams for Claude Code MCP.",
   "keywords": [
     "claude",

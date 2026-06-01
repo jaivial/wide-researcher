@@ -110,31 +110,6 @@ wr_symbol_find({ query: "Workspace combobox", lang: "tsx" })
 
 ---
 
-## `wr_call_args(callee?, argIndex?, literal?, lang?, path?, k?)`
-
-Enumerate literal arguments at indexed call sites. Use this for precise key/literal discovery, especially multi-line calls such as `atomWithStorage(\n  'key',\n  ...)`, where semantic search snippets are too broad.
-
-### Signature
-
-```ts
-wr_call_args(args: {
-  callee?: string;       // e.g. atomWithStorage
-  argIndex?: number;     // zero-based argument index
-  literal?: string;      // exact literal filter
-  lang?: string;         // typescript / tsx / csharp
-  path?: string;         // absolute file path
-  k?: number;            // default 50
-}): Promise<CallArgResult[]>
-```
-
-### Example
-
-```ts
-wr_call_args({ callee: "atomWithStorage", argIndex: 0, k: 100 })
-```
-
----
-
 ## `wr_callers(symbol, k?)`
 
 Find chunks/files that call or reference a symbol. Use for "what calls X" and blast-radius checks.
@@ -223,7 +198,7 @@ wr_exports({ path: "/var/www/kraken/Dashboard/src/api/endpoints.ts" })
 
 ---
 
-## `wr_find(query, k?, lang?, role?, runtime?, layer?, mode?)`
+## `wr_find(query, k?, lang?, role?, layer?, mode?)`
 
 Unified code chunk search. Three modes, one tool. Use after `wr_arch_impact` when you need chunk-level follow-up.
 
@@ -235,12 +210,8 @@ wr_find(args: {
   k?: number;             // default 10
   lang?: string;          // typescript / tsx / python / go / rust / csharp / json / markdown / css / text
   role?: string;          // frontend / backend / docs / tests / config / stories / other
-  runtime?: string;       // browser / node / dotnet / python / docs / unknown
   layer?: string;         // atoms / ui / hooks / helpers / components / pages / layouts / api / signalr / locales / stories / types / constants
   mode?: 'semantic' | 'keyword' | 'hybrid';   // default 'hybrid'
-  include_code_lines?: boolean; // default false; compact snippets are returned
-  snippet_lines?: number;       // default 20
-  max_bytes?: number;           // default 64000 or WIDE_RESEARCHER_MAX_RESPONSE_BYTES
 }): Promise<SearchResult[]>
 ```
 
@@ -264,17 +235,10 @@ Each result is a chunk-level hit:
   end_line: number,
   language: string,
   role: string | null,
-  runtime: string | null,
   atomic_layer: string | null,
   symbol_kind: string | null,
   symbol_name: string | null,
   preview: string,
-  snippet_lines?: { line: number, text: string }[],
-  line_count: number,
-  content_chars: number,
-  matched_terms: string[],
-  match_reason: string,
-  warnings: string[],
   score: number | null,
 }
 ```
@@ -297,27 +261,21 @@ wr_find({ query: "rate limit middleware", k: 20 })
 
 ---
 
-## `wr_file(path, offset?, limit?, content_mode?, max_chars?)`
+## `wr_file(path)`
 
-Fetch indexed chunks for one file, ordered by `chunk_index`. It is paginated and preview-only by default so broad reads stay within MCP response budgets.
+Fetch every indexed chunk of one file, ordered by `chunk_index`. Use after search/impact tools to read full structured content.
 
 ### Signature
 
 ```ts
-wr_file(args: {
-  path: string,
-  offset?: number,
-  limit?: number,
-  content_mode?: 'none' | 'preview' | 'full',
-  max_chars?: number,
-}): Promise<{ chunks: FileChunk[], next_offset: number | null }>
+wr_file(args: { path: string }): Promise<FileChunk[]>
 ```
 
 `path` is the absolute path as stored in the index.
 
 ### Returns
 
-Each chunk has bounded content/preview metadata:
+Each chunk has full content:
 
 ```ts
 {

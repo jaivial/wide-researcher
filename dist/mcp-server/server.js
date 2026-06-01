@@ -15,7 +15,8 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { CallToolRequestSchema, ListToolsRequestSchema, } from '@modelcontextprotocol/sdk/types.js';
 import { loadProjectConfig } from './config.js';
 import { EmbedWorker } from './embed.js';
-import { wrArchImpact, wrCallers, wrCallees, wrExports, wrFind, wrFile, wrImpact, wrImporters, wrIndexStatus, wrSymbolFind, } from './tools.js';
+import { InterpreterWorker } from './interpreter.js';
+import { wrArchImpact, wrCallArgs, wrCallers, wrCallees, wrExports, compactSearchResult, wrFind, wrFile, wrImpact, wrImporters, wrIndexStatus, wrSymbolFind, } from './tools.js';
 import { pyPackageRoot, venvPython } from '../utils/paths.js';
 import { getResult, putResult } from '../utils/cache.js';
 import path from 'node:path';
@@ -34,6 +35,12 @@ const embed = (text) => embedWorker.embed(text);
 const rerank = (query, docs) => embedWorker.rerank(query, docs);
 const RERANK_DISABLED = process.env.WIDE_RESEARCHER_DISABLE_RERANK === '1';
 const rerankFn = RERANK_DISABLED ? undefined : rerank;
+/* ── Response interpreter ──────────────────────────────────────────────
+ * Condenses verbose tool responses via AI so LLM clients don't choke.
+ * Toggle off with WIDE_RESEARCHER_DISABLE_INTERPRETER=1.
+ */
+const DISABLE_INTERPRETER = process.env.WIDE_RESEARCHER_DISABLE_INTERPRETER === '1';
+const interpreter = new InterpreterWorker();
 /* ── Tool catalog ───────────────────────────────────────────────────── */
 const TOOLS = [
     {
@@ -55,6 +62,10 @@ const TOOLS = [
                     type: 'string',
                     description: 'Filter by role: "frontend" / "backend" / "docs" / "tests" / "config" / "stories" / "other".',
                 },
+                runtime: {
+                    type: 'string',
+                    description: 'Filter by runtime: "browser" / "node" / "dotnet" / "python" / "docs" / "unknown".',
+                },
                 layer: {
                     type: 'string',
                     description: 'Filter by atomic-design layer: "atoms" / "ui" / "hooks" / "helpers" / "components" / "pages" / "layouts" / "api" / "signalr" / "locales" / "stories" / "types" / "constants".',
@@ -63,6 +74,18 @@ const TOOLS = [
                     type: 'string',
                     enum: ['semantic', 'keyword', 'hybrid'],
                     description: 'Default "hybrid".',
+                },
+                include_code_lines: {
+                    type: 'boolean',
+                    description: 'Include full code_lines for each result. Default false; compact snippets are returned by default.',
+                },
+                snippet_lines: {
+                    type: 'number',
+                    description: 'Number of snippet lines per result when include_code_lines is false. Default 20.',
+                },
+                max_bytes: {
+                    type: 'number',
+                    description: 'Approximate response byte budget. Default from WIDE_RESEARCHER_MAX_RESPONSE_BYTES or 64000.',
                 },
             },
             required: ['query'],
@@ -78,6 +101,14 @@ const TOOLS = [
                     type: 'string',
                     description: 'Absolute path to the file as stored in the index.',
                 },
+                offset: { type: 'number', description: 'Chunk offset for pagination. Default 0.' },
+                limit: { type: 'number', description: 'Max chunks to return. Default 20, max 100.' },
+                content_mode: {
+                    type: 'string',
+                    enum: ['none', 'preview', 'full'],
+                    description: 'Default "preview". Use "full" only for bounded follow-up reads.',
+                },
+                max_chars: { type: 'number', description: 'Max content/preview chars per chunk. Default 2000.' },
             },
             required: ['path'],
         },
@@ -109,6 +140,21 @@ const TOOLS = [
                 lang: { type: 'string', description: 'Optional language filter: typescript/tsx/csharp.' },
             },
             required: ['query'],
+        },
+    },
+    {
+        name: 'wr_call_args',
+        description: 'Enumerate literal arguments at indexed call sites. Use for precise storage-key discovery such as atomWithStorage arg0 instead of broad semantic search.',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                callee: { type: 'string', description: 'Optional callee name, e.g. atomWithStorage.' },
+                argIndex: { type: 'number', description: 'Optional zero-based argument index.' },
+                literal: { type: 'string', description: 'Optional exact literal value.' },
+                lang: { type: 'string', description: 'Optional language filter.' },
+                path: { type: 'string', description: 'Optional absolute file path filter.' },
+                k: { type: 'number', description: 'Max rows. Default 50.' },
+            },
         },
     },
     {
@@ -177,8 +223,26 @@ const TOOLS = [
         inputSchema: { type: 'object', properties: {} },
     },
 ];
-function jsonContent(payload) {
-    return { content: [{ type: 'text', text: JSON.stringify(payload, null, 2) }] };
+const DEFAULT_MAX_RESPONSE_BYTES = Number.parseInt(process.env.WIDE_RESEARCHER_MAX_RESPONSE_BYTES ?? '64000', 10);
+function responseBudget(args) {
+    const requested = typeof args?.max_bytes === 'number' ? args.max_bytes : DEFAULT_MAX_RESPONSE_BYTES;
+    return Math.min(Math.max(8192, requested || 64000), 512000);
+}
+function truncatePayload(payload, maxBytes) {
+    const text = JSON.stringify(payload, null, 2);
+    const bytes = Buffer.byteLength(text, 'utf8');
+    if (bytes <= maxBytes)
+        return payload;
+    return {
+        truncated: true,
+        original_bytes: bytes,
+        returned_bytes_budget: maxBytes,
+        summary: 'Response exceeded MCP byte budget. Retry with lower k, narrower filters, pagination, or unsafe/full flags only for targeted follow-up reads.',
+        preview: text.slice(0, Math.max(1000, maxBytes - 1000)),
+    };
+}
+function jsonContent(payload, maxBytes = DEFAULT_MAX_RESPONSE_BYTES) {
+    return { content: [{ type: 'text', text: JSON.stringify(truncatePayload(payload, maxBytes), null, 2) }] };
 }
 let cachedPointsCount = null;
 let cachedPointsCountAt = 0;
@@ -218,27 +282,42 @@ const HANDLERS = {
         k: a.k ?? 10,
         lang: a.lang ?? null,
         role: a.role ?? null,
+        runtime: a.runtime ?? null,
         layer: a.layer ?? null,
         mode: a.mode ?? 'hybrid',
+        include_code_lines: a.include_code_lines === true,
+        snippet_lines: a.snippet_lines ?? 20,
+        max_bytes: responseBudget(a),
         rerank: !RERANK_DISABLED,
-    }, async () => jsonContent({
-        tool: 'wr_find',
-        query: a.query,
-        mode: a.mode ?? 'hybrid',
-        results: await wrFind({
+    }, async () => {
+        const results = await wrFind({
             embed,
             rerank: rerankFn,
             query: a.query ?? '',
             k: a.k ?? 10,
             lang: a.lang ?? null,
             role: a.role ?? null,
+            runtime: a.runtime ?? null,
             layer: a.layer ?? null,
             mode: a.mode ?? 'hybrid',
-        }),
-    })),
+        });
+        return jsonContent({
+            tool: 'wr_find',
+            query: a.query,
+            mode: a.mode ?? 'hybrid',
+            compact: a.include_code_lines !== true,
+            results: results.map((r) => compactSearchResult(r, a.snippet_lines ?? 20, a.include_code_lines === true)),
+        }, responseBudget(a));
+    }),
     wr_file: async (a) => {
-        const chunks = await wrFile({ path: a.path ?? '' });
-        return jsonContent({ tool: 'wr_file', path: a.path, count: chunks.length, chunks });
+        const result = await wrFile({
+            path: a.path ?? '',
+            offset: a.offset,
+            limit: a.limit,
+            contentMode: a.content_mode,
+            maxChars: a.max_chars,
+        });
+        return jsonContent({ tool: 'wr_file', path: a.path, count: result.returned, ...result }, responseBudget(a));
     },
     wr_impact: async (a) => withResultCache({ tool: 'wr_impact', d: a.description ?? '', k: a.k ?? 15, rerank: !RERANK_DISABLED }, async () => {
         const files = await wrImpact({
@@ -272,9 +351,20 @@ const HANDLERS = {
         });
         return jsonContent({ tool: 'wr_symbol_find', query: a.query, count: results.length, results });
     }),
+    wr_call_args: async (a) => {
+        const results = await wrCallArgs({
+            callee: a.callee ?? null,
+            argIndex: a.argIndex ?? null,
+            literal: a.literal ?? null,
+            lang: a.lang ?? null,
+            path: a.path ?? null,
+            k: a.k ?? 50,
+        });
+        return jsonContent({ tool: 'wr_call_args', count: results.length, results }, responseBudget(a));
+    },
     wr_callers: async (a) => {
         const results = await wrCallers({ symbol: a.symbol ?? '', k: a.k ?? 20 });
-        return jsonContent({ tool: 'wr_callers', symbol: a.symbol, count: results.length, results });
+        return jsonContent({ tool: 'wr_callers', symbol: a.symbol, count: results.length, results }, responseBudget(a));
     },
     wr_callees: async (a) => {
         const result = await wrCallees({ symbolOrFile: a.symbolOrFile ?? '', k: a.k ?? 20 });
@@ -307,7 +397,45 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         };
     }
     try {
-        return await handler((args ?? {}));
+        const toolArgs = (args ?? {});
+        const response = await handler(toolArgs);
+        // If interpreter is active, condense the response for LLM clients.
+        if (!DISABLE_INTERPRETER) {
+            const rawText = response.content[0]?.text ?? '';
+            let rawPayload = {};
+            try {
+                rawPayload = JSON.parse(rawText);
+            }
+            catch {
+                /* not JSON — skip interpretation */
+                return response;
+            }
+            // Extract the query/description for context.
+            const queryText = rawPayload.query ??
+                rawPayload.description ??
+                rawPayload.symbol ??
+                rawPayload.symbolOrFile ??
+                rawPayload.pathOrModule ??
+                rawPayload.path ??
+                null;
+            const result = await interpreter.interpret(name, queryText, rawPayload);
+            if (result.ok && result.interpretation) {
+                // Prepend a concise interpretation block and keep the full
+                // raw data as a secondary section for consumers that need it.
+                response.content = [
+                    {
+                        type: 'text',
+                        text: JSON.stringify(truncatePayload({
+                            interpretation: result.interpretation,
+                            tokens_saved: Math.max(0, result.tokens_in - result.tokens_out),
+                            tool: rawPayload.tool ?? name,
+                            data: toolArgs.include_raw === true ? rawPayload : undefined,
+                        }, responseBudget(toolArgs)), null, 2),
+                    },
+                ];
+            }
+        }
+        return response;
     }
     catch (err) {
         return {
@@ -327,6 +455,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 async function shutdown() {
     try {
         await embedWorker.close();
+    }
+    catch {
+        /* ignore */
+    }
+    try {
+        await interpreter.close();
     }
     catch {
         /* ignore */

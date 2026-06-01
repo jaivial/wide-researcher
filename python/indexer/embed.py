@@ -180,6 +180,27 @@ class GTEQwen2Provider(_LocalSTProvider):
         super().__init__(EMBED_MODEL, trust_remote_code=False)
 
 
+# ── Daemon provider (shared embed daemon over unix socket) ───────────────────
+
+
+class DaemonProvider(EmbedProvider):
+    """Routes embedding to the shared embed daemon (scripts/embed_daemon.py).
+
+    Holds NO model in this process, so the indexer / watcher subprocess
+    stays tiny and leak-free — the daemon is the single model host.
+    """
+
+    def __init__(self):
+        from .daemon_client import DaemonClient
+        self._client = DaemonClient()
+
+    def embed_batch(self, texts: list[str]) -> list[list[float]]:
+        return self._client.embed_batch(texts)
+
+    def embed_query(self, text: str) -> list[float]:
+        return self._client.embed_query(text)
+
+
 # ── Cohere provider ─────────────────────────────────────────────────────────
 
 
@@ -344,6 +365,7 @@ _PROVIDER_MAP: dict[str, type[EmbedProvider]] = {
     "local-bge-large": BGELargeProvider,
     "local-gte-qwen2": GTEQwen2Provider,
     "cohere": CohereProvider,
+    "daemon": DaemonProvider,
 }
 
 
