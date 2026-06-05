@@ -16,7 +16,7 @@ import { CallToolRequestSchema, ListToolsRequestSchema, } from '@modelcontextpro
 import { loadProjectConfig } from './config.js';
 import { EmbedWorker } from './embed.js';
 import { InterpreterWorker } from './interpreter.js';
-import { wrArchImpact, wrCallArgs, wrCallers, wrCallees, wrExports, compactSearchResult, wrFind, wrFile, wrImpact, wrImporters, wrIndexStatus, wrSymbolFind, } from './tools.js';
+import { wrArchImpact, wrCallArgs, wrCallers, wrCallees, wrExports, compactSearchResult, wrFind, wrFile, wrImpact, wrImporters, wrIndexStatus, wrSkillAdd, wrSkillFind, wrSymbolFind, } from './tools.js';
 import { pyPackageRoot, venvPython } from '../utils/paths.js';
 import { getResult, putResult } from '../utils/cache.js';
 import path from 'node:path';
@@ -222,6 +222,38 @@ const TOOLS = [
         description: 'Index health. Returns collection name, status (green/yellow/red), points_count, vector dim.',
         inputSchema: { type: 'object', properties: {} },
     },
+    {
+        name: 'wr_skill_find',
+        description: 'Hybrid semantic + full-text search over the project <collection>_skills collection. Use to locate the right SKILL.md / agents / references chunk for a question about "how do I do X" or "what skill handles Y". Returns skill_name, scope, file_kind, path, heading, preview.',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                query: { type: 'string', description: 'Free-form natural language or literal terms.' },
+                k: { type: 'number', description: 'Max results. Default 10.' },
+                skill: { type: 'string', description: 'Filter by exact skill_name (frontmatter name).' },
+                scope: { type: 'string', enum: ['project', 'global'], description: 'Filter by source scope.' },
+                file_kind: { type: 'string', enum: ['skill', 'agent', 'reference'], description: 'Filter by source file kind.' },
+            },
+            required: ['query'],
+        },
+    },
+    {
+        name: 'wr_skill_add',
+        description: 'Add a markdown document to the <collection>_skills Qdrant collection. Accepts either `path` (abs .md file or directory of SKILL.md / references/*.md / agents/*.md under <project>/.claude/ or ~/.claude/) or `content` (inline markdown). Idempotent — re-adding the same source reuses the deterministic point id.',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                path: { type: 'string', description: 'Absolute path to a .md file or directory of skill/agent files. Mutually exclusive with `content`.' },
+                content: { type: 'string', description: 'Inline markdown content. Mutually exclusive with `path`.' },
+                skill_name: { type: 'string', description: 'Override skill_name. Default: parsed from frontmatter or path basename.' },
+                description: { type: 'string', description: 'Override description (inline content only).' },
+                trigger: { type: 'string', description: 'Comma-separated trigger keywords (inline content only).' },
+                file_kind: { type: 'string', enum: ['skill', 'agent', 'reference'], description: 'Override file_kind detection.' },
+                scope: { type: 'string', enum: ['project', 'global'], description: 'Override scope detection.' },
+                heading: { type: 'string', description: 'Heading label for inline content. Default "(inline)".' },
+            },
+        },
+    },
 ];
 const DEFAULT_MAX_RESPONSE_BYTES = Number.parseInt(process.env.WIDE_RESEARCHER_MAX_RESPONSE_BYTES ?? '64000', 10);
 function responseBudget(args) {
@@ -240,6 +272,40 @@ function truncatePayload(payload, maxBytes) {
         summary: 'Response exceeded MCP byte budget. Retry with lower k, narrower filters, pagination, or unsafe/full flags only for targeted follow-up reads.',
         preview: text.slice(0, Math.max(1000, maxBytes - 1000)),
     };
+}
+function fitToBudget(payload, maxBytes) {
+    const text = JSON.stringify(payload, null, 2);
+    if (Buffer.byteLength(text, 'utf8') <= maxBytes)
+        return payload;
+    const obj = payload;
+    if (Array.isArray(obj.results) && obj.results.length > 0) {
+        for (const lines of [10, 6, 3, 1]) {
+            const slim = {
+                ...obj,
+                results: obj.results.map((r) => {
+                    const snip = r.snippet_lines;
+                    if (Array.isArray(snip)) {
+                        return { ...r, snippet_lines: snip.slice(0, lines), omitted_lines: r.omitted_lines };
+                    }
+                    return r;
+                }),
+            };
+            if (Buffer.byteLength(JSON.stringify(slim, null, 2), 'utf8') <= maxBytes)
+                return slim;
+        }
+        for (const keep of [3, 2, 1]) {
+            if (obj.results.length <= keep)
+                break;
+            const slim = {
+                ...obj,
+                results: obj.results.slice(0, keep),
+                dropped_results: obj.results.length - keep,
+            };
+            if (Buffer.byteLength(JSON.stringify(slim, null, 2), 'utf8') <= maxBytes)
+                return slim;
+        }
+    }
+    return truncatePayload(payload, maxBytes);
 }
 function jsonContent(payload, maxBytes = DEFAULT_MAX_RESPONSE_BYTES) {
     return { content: [{ type: 'text', text: JSON.stringify(truncatePayload(payload, maxBytes), null, 2) }] };
@@ -301,13 +367,14 @@ const HANDLERS = {
             layer: a.layer ?? null,
             mode: a.mode ?? 'hybrid',
         });
-        return jsonContent({
+        const built = {
             tool: 'wr_find',
             query: a.query,
             mode: a.mode ?? 'hybrid',
             compact: a.include_code_lines !== true,
             results: results.map((r) => compactSearchResult(r, a.snippet_lines ?? 20, a.include_code_lines === true)),
-        }, responseBudget(a));
+        };
+        return jsonContent(fitToBudget(built, responseBudget(a)), responseBudget(a));
     }),
     wr_file: async (a) => {
         const result = await wrFile({
@@ -383,6 +450,37 @@ const HANDLERS = {
         return jsonContent({ tool: 'wr_arch_impact', description: a.description, count: files.length, files });
     }),
     wr_index_status: async () => jsonContent({ tool: 'wr_index_status', ...(await wrIndexStatus()) }),
+    wr_skill_find: async (a) => withResultCache({
+        tool: 'wr_skill_find',
+        q: a.query ?? '',
+        k: a.k ?? 10,
+        skill: a.skill ?? null,
+        scope: a.scope ?? null,
+        file_kind: a.fileKind ?? null,
+    }, async () => {
+        const results = await wrSkillFind({
+            embed,
+            query: a.query ?? '',
+            k: a.k ?? 10,
+            skill: a.skill ?? null,
+            scope: a.scope ?? null,
+            fileKind: a.fileKind ?? null,
+        });
+        return jsonContent({ tool: 'wr_skill_find', query: a.query, count: results.length, results }, responseBudget(a));
+    }),
+    wr_skill_add: async (a) => {
+        const result = await wrSkillAdd(embed, {
+            path: a.path,
+            content: a.content,
+            skill_name: a.skillName,
+            description: a.description,
+            trigger: a.trigger,
+            file_kind: a.fileKind,
+            scope: a.scope,
+            heading: a.heading,
+        });
+        return jsonContent({ tool: 'wr_skill_add', ...result }, responseBudget(a));
+    },
 };
 /* ── Server wiring ──────────────────────────────────────────────────── */
 const server = new Server({ name: 'wide-researcher', version: '0.1.0-alpha.0' }, { capabilities: { tools: {} } });

@@ -9,7 +9,11 @@
 // No legacy aliases — wide-researcher is a fresh project, no
 // migration history to support.
 
-import { qdrant, COLLECTION, PROJECT_CONFIG } from './db.js';
+import { createHash } from 'node:crypto';
+import { promises as fs } from 'node:fs';
+import path from 'node:path';
+
+import { qdrant, COLLECTION, SKILLS_COLLECTION, PROJECT_CONFIG } from './db.js';
 import {
   neo4jCallers,
   neo4jCallees,
@@ -108,6 +112,22 @@ function payloadText(p: Record<string, unknown>, key: string): string | undefine
   return typeof value === 'string' && value.length > 0 ? value : undefined;
 }
 
+function keywordPrefetches(query: string, limit: number, filter?: ReturnType<typeof buildFilter>): Array<Record<string, unknown>> {
+  const must = filter?.must ?? [];
+  const exactFields = ['symbol_name', 'file_path', 'declared_symbols', 'exports', 'calls', 'call_arg_literals', 'storage_keys', 'references'];
+  const textFields = ['content', 'graph_text', 'callsite_text'];
+  return [
+    ...exactFields.map((key) => ({
+      filter: { must: [{ key, match: { value: query } }, ...must] },
+      limit,
+    })),
+    ...textFields.map((key) => ({
+      filter: { must: [{ key, match: { text: query } }, ...must] },
+      limit,
+    })),
+  ];
+}
+
 function payloadToResult(point: QdrantPoint): SearchResult {
   const p = (point.payload ?? {}) as Record<string, unknown>;
   const content = typeof p.content === 'string' ? p.content : '';
@@ -150,21 +170,72 @@ function payloadToResult(point: QdrantPoint): SearchResult {
   };
 }
 
-export function compactSearchResult(row: SearchResult, snippetLines = 20, includeCodeLines = false): SearchResult | CompactSearchResult {
-  const hasMore = row.code_lines.length > snippetLines;
+const COMPACT_FIELD_CHAR_CAPS: Record<string, number> = {
+  graph_text: 240,
+  callsite_text: 240,
+  preview: 300,
+};
+const COMPACT_ARRAY_CAPS: Record<string, number> = {
+  declared_symbols: 25,
+  imports: 15,
+  imported_files: 10,
+  exports: 25,
+  calls: 25,
+  call_arg_literals: 15,
+  storage_keys: 15,
+  type_refs: 20,
+  base_types: 10,
+  implements: 10,
+  references: 10,
+};
+const COMPACT_DROP_ORDER = [
+  'graph_text',
+  'callsite_text',
+  'references',
+  'base_types',
+  'implements',
+  'imported_files',
+];
+
+function capString(s: string | undefined, max: number | undefined): string | undefined {
+  if (s === undefined) return s;
+  const limit = max ?? 240;
+  return s.length <= limit ? s : s.slice(0, limit - 1) + '\u2026';
+}
+
+export function compactSearchResult(
+  row: SearchResult,
+  snippetLines = 20,
+  includeCodeLines = false,
+  perResultByteBudget = 2200,
+): SearchResult | CompactSearchResult {
+  const { code_lines: codeLines, ...rest } = row;
   if (includeCodeLines) {
     return {
       ...row,
       has_more_content: false,
     } as SearchResult & { has_more_content: boolean };
   }
-  const { code_lines: codeLines, ...rest } = row;
-  return {
+  const out = {
     ...rest,
+    graph_text: capString(row.graph_text, COMPACT_FIELD_CHAR_CAPS.graph_text),
+    callsite_text: capString(row.callsite_text, COMPACT_FIELD_CHAR_CAPS.callsite_text),
+    preview: capString(row.preview, COMPACT_FIELD_CHAR_CAPS.preview) ?? '',
     snippet_lines: codeLines.slice(0, Math.max(0, snippetLines)),
     omitted_lines: Math.max(0, codeLines.length - snippetLines),
-    has_more_content: hasMore,
-  };
+    has_more_content: codeLines.length > snippetLines,
+  } as CompactSearchResult;
+  for (const [k, cap] of Object.entries(COMPACT_ARRAY_CAPS)) {
+    const arr = (out as unknown as Record<string, unknown>)[k];
+    if (Array.isArray(arr) && arr.length > cap) {
+      (out as unknown as Record<string, unknown>)[k] = arr.slice(0, cap);
+    }
+  }
+  for (const field of COMPACT_DROP_ORDER) {
+    if (Buffer.byteLength(JSON.stringify(out), 'utf8') <= perResultByteBudget) break;
+    delete (out as unknown as Record<string, unknown>)[field];
+  }
+  return out;
 }
 
 const IMPACT_WEIGHT: Record<string, number> = {
@@ -390,16 +461,12 @@ async function searchSemantic(opts: ModeOpts): Promise<SearchResult[]> {
 async function searchKeyword(
   opts: Omit<ModeOpts, 'embed'> & { embed?: EmbedFn },
 ): Promise<SearchResult[]> {
-  const must: Record<string, unknown>[] = [
-    { key: 'content', match: { text: opts.queryText } },
-    ...(opts.filter?.must ?? []),
-  ];
   const fetchK = opts.rerank ? Math.max(opts.top_k * FUSION_MULTIPLIER, 40) : opts.top_k;
-  const res = (await qdrant.scroll(COLLECTION, {
-    filter: { must },
+  const res = (await qdrant.query(COLLECTION, {
+    prefetch: keywordPrefetches(opts.queryText, fetchK, opts.filter),
+    query: { fusion: 'rrf' },
     limit: fetchK,
     with_payload: true,
-    with_vector: false,
   })) as { points?: QdrantPoint[] };
   const rows = (res.points ?? []).map((pt) => ({
     ...payloadToResult(pt),
@@ -411,15 +478,11 @@ async function searchKeyword(
 
 async function searchHybrid(opts: ModeOpts): Promise<SearchResult[]> {
   const vec = await opts.embed(opts.queryText);
-  const keywordMust: Record<string, unknown>[] = [
-    { key: 'content', match: { text: opts.queryText } },
-    ...(opts.filter?.must ?? []),
-  ];
   const fetchK = opts.rerank ? Math.max(opts.top_k * FUSION_MULTIPLIER, 40) : opts.top_k;
   const res = (await qdrant.query(COLLECTION, {
     prefetch: [
       { query: vec, using: '', limit: fetchK, filter: opts.filter },
-      { filter: { must: keywordMust }, limit: fetchK },
+      ...keywordPrefetches(opts.queryText, fetchK, opts.filter),
     ],
     query: { fusion: 'rrf' },
     limit: fetchK,
@@ -517,9 +580,25 @@ export async function wrFind(opts: FindOpts): Promise<SearchResult[]> {
     perFileCap: opts.perFileCap,
   };
 
-  if (mode === 'semantic') return searchSemantic(baseOpts);
-  if (mode === 'keyword') return searchKeyword(baseOpts);
-  return searchHybrid(baseOpts);
+  const runMode = async (currentOpts: ModeOpts): Promise<SearchResult[]> => {
+    if (mode === 'semantic') return searchSemantic(currentOpts);
+    if (mode === 'keyword') return searchKeyword(currentOpts);
+    return searchHybrid(currentOpts);
+  };
+
+  const strict = await runMode(baseOpts);
+  if (strict.length > 0) return strict;
+
+  if (filter) {
+    const relaxed = await runMode({ ...baseOpts, filter: undefined });
+    if (relaxed.length > 0) return relaxed;
+  }
+
+  if (mode === 'keyword') {
+    return searchHybrid({ ...baseOpts, filter: undefined });
+  }
+
+  return strict;
 }
 
 export interface FileChunk {
@@ -1027,4 +1106,267 @@ export async function wrIndexStatus(): Promise<IndexStatus> {
     vector_size: info.config?.params?.vectors?.size,
     distance: info.config?.params?.vectors?.distance,
   };
+}
+
+/* ── Skills collection tools ─────────────────────────────────────────────── */
+
+export interface SkillSearchResult {
+  skill_name: string;
+  scope: string;
+  file_kind: string;
+  path: string;
+  heading: string;
+  description?: string;
+  trigger?: string;
+  preview: string;
+  score: number;
+}
+
+const SKILL_FUSION_MULTIPLIER = 4;
+
+function skillsHashId(skillName: string, heading: string, filePath: string): string {
+  // Deterministic UUID-shaped id; mirrors python/indexer/db.py:_skills_point_id
+  // so the two write paths collide on the same id (no duplicate points).
+  const buf = createHash('sha1')
+    .update('wr-skills::' + PROJECT_CONFIG.collectionName + '::' + skillName + '::' + heading + '::' + filePath)
+    .digest();
+  const hex = buf.subarray(0, 16).toString('hex');
+  return hex.slice(0, 8) + '-' + hex.slice(8, 12) + '-5' + hex.slice(13, 16) + '-' + hex.slice(16, 20) + '-' + hex.slice(20, 32);
+}
+
+export async function wrSkillFind(opts: {
+  embed: (text: string) => Promise<number[]>;
+  query: string;
+  k?: number;
+  skill?: string | null;
+  scope?: 'project' | 'global' | null;
+  fileKind?: 'skill' | 'agent' | 'reference' | null;
+}): Promise<SkillSearchResult[]> {
+  const k = opts.k ?? 10;
+  const vec = await opts.embed(opts.query);
+  const must: Record<string, unknown>[] = [];
+  if (opts.skill) must.push({ key: 'skill_name', match: { value: opts.skill } });
+  if (opts.scope) must.push({ key: 'scope', match: { value: opts.scope } });
+  if (opts.fileKind) must.push({ key: 'file_kind', match: { value: opts.fileKind } });
+  const semanticFilter = must.length ? { must } : undefined;
+  const keywordFilter = { must: [{ key: 'content', match: { text: opts.query } }, ...must] };
+  const fetchK = Math.max(k * SKILL_FUSION_MULTIPLIER, 20);
+  const res = (await qdrant.query(SKILLS_COLLECTION, {
+    prefetch: [
+      { query: vec, limit: fetchK, filter: semanticFilter },
+      { filter: keywordFilter, limit: fetchK },
+    ],
+    query: { fusion: 'rrf' },
+    limit: fetchK,
+    with_payload: true,
+  })) as { points?: QdrantPoint[] };
+  const points = res.points ?? [];
+  return points.slice(0, k).map((pt) => {
+    const p = (pt.payload ?? {}) as Record<string, unknown>;
+    const content = typeof p.content === 'string' ? p.content : '';
+    return {
+      skill_name: typeof p.skill_name === 'string' ? p.skill_name : '',
+      scope: typeof p.scope === 'string' ? p.scope : '',
+      file_kind: typeof p.file_kind === 'string' ? p.file_kind : '',
+      path: typeof p.path === 'string' ? p.path : '',
+      heading: typeof p.heading === 'string' ? p.heading : '',
+      description: typeof p.description === 'string' ? p.description : undefined,
+      trigger: typeof p.trigger === 'string' ? p.trigger : undefined,
+      preview: content.slice(0, 500),
+      score: typeof pt.score === 'number' ? pt.score : 0,
+    };
+  });
+}
+
+export interface SkillAddInput {
+  path?: string;
+  content?: string;
+  skill_name?: string;
+  description?: string;
+  trigger?: string;
+  file_kind?: 'skill' | 'agent' | 'reference';
+  scope?: 'project' | 'global';
+  heading?: string;
+}
+
+export interface SkillAddResult {
+  points_upserted: number;
+  ids: string[];
+  skill_name: string;
+  path: string;
+}
+
+function parseFrontmatter(raw: string): { meta: Record<string, string>; body: string } {
+  const m = /^---\s*\n([\s\S]*?)\n---\s*\n([\s\S]*)$/.exec(raw);
+  if (!m || m[1] === undefined || m[2] === undefined) return { meta: {}, body: raw };
+  const meta: Record<string, string> = {};
+  for (const line of m[1].split(/\r?\n/)) {
+    if (!line.trim() || line.trim().startsWith('#')) continue;
+    const idx = line.indexOf(':');
+    if (idx === -1) continue;
+    const key = line.slice(0, idx).trim().toLowerCase();
+    const val = line.slice(idx + 1).trim().replace(/^['"]|['"]$/g, '');
+    meta[key] = val;
+  }
+  return { meta, body: m[2] };
+}
+
+function chunkMarkdown(body: string): { heading: string; content: string }[] {
+  const headingRe = /^(#{2,4})\s+(.+?)\s*$/gm;
+  const matches: { idx: number; title: string }[] = [];
+  let m: RegExpExecArray | null;
+  while ((m = headingRe.exec(body)) !== null) {
+    const title = (m[2] ?? '').trim();
+    matches.push({ idx: m.index, title });
+  }
+  if (matches.length === 0) {
+    const trimmed = body.trim();
+    return trimmed ? [{ heading: '(intro)', content: trimmed }] : [];
+  }
+  const ranges: { heading: string; content: string }[] = [];
+  for (let i = 0; i < matches.length; i++) {
+    const cur = matches[i];
+    const next = i + 1 < matches.length ? matches[i + 1] : undefined;
+    if (!cur) continue;
+    const startLineEnd = body.indexOf('\n', cur.idx);
+    const sliceStart = startLineEnd === -1 ? cur.idx : startLineEnd + 1;
+    const sliceEnd = next ? next.idx : body.length;
+    const content = body.slice(sliceStart, sliceEnd).trim();
+    if (content) ranges.push({ heading: cur.title, content });
+  }
+  return ranges;
+}
+
+export async function wrSkillAdd(
+  embed: (text: string) => Promise<number[]>,
+  input: SkillAddInput,
+): Promise<SkillAddResult> {
+  if (!input.path && !input.content) {
+    throw new Error('wr_skill_add requires either `path` (abs file/dir) or `content` (inline markdown).');
+  }
+  if (input.path && input.content) {
+    throw new Error('wr_skill_add accepts `path` OR `content`, not both.');
+  }
+
+  // ── inline path: single chunk
+  if (input.content) {
+    const skillName = (input.skill_name || 'inline').trim();
+    const scope = input.scope ?? 'project';
+    const fileKind = input.file_kind ?? 'skill';
+    const heading = (input.heading || '(inline)').trim();
+    const virtualPath = 'inline://' + skillName + '#' + heading;
+    const vec = await embed(input.content);
+    const id = skillsHashId(skillName, heading, virtualPath);
+    await qdrant.upsert(SKILLS_COLLECTION, {
+      points: [
+        {
+          id,
+          vector: vec,
+          payload: {
+            skill_name: skillName,
+            scope,
+            file_kind: fileKind,
+            path: virtualPath,
+            description: input.description ?? '',
+            trigger: input.trigger ?? '',
+            heading,
+            content: input.content,
+          },
+        },
+      ],
+      wait: true,
+    });
+    return { points_upserted: 1, ids: [id], skill_name: skillName, path: virtualPath };
+  }
+
+  // ── file/dir path: walk + chunk + embed + upsert
+  const abs = path.resolve(input.path!);
+  const home = process.env.HOME || process.env.USERPROFILE || '';
+  const projectRoot = PROJECT_CONFIG.projectRoot;
+  const allowedRoots = [path.resolve(projectRoot), path.resolve(home, '.claude')];
+  const inAllowed = allowedRoots.some((r) => abs === r || abs.startsWith(r + path.sep));
+  if (!inAllowed) {
+    throw new Error(
+      'wr_skill_add: path ' + abs + ' is outside allowed roots (' +
+        allowedRoots.join(', ') +
+        '). Pass a path under <project>/.claude/ or ~/.claude/.',
+    );
+  }
+  const stat = await fs.stat(abs).catch(() => null);
+  if (!stat) throw new Error('wr_skill_add: path not found: ' + abs);
+
+  const files: string[] = [];
+  if (stat.isDirectory()) {
+    const walk = async (dir: string): Promise<void> => {
+      const entries = await fs.readdir(dir, { withFileTypes: true });
+      for (const e of entries) {
+        const p = path.join(dir, e.name);
+        if (e.isDirectory()) {
+          if (e.name === 'node_modules' || e.name === '.git') continue;
+          await walk(p);
+        } else if (e.isFile() && p.endsWith('.md')) {
+          if (
+            p.endsWith('SKILL.md') ||
+            p.includes(path.sep + 'references' + path.sep) ||
+            p.includes(path.sep + 'agents' + path.sep)
+          ) {
+            files.push(p);
+          }
+        }
+      }
+    };
+    await walk(abs);
+  } else if (stat.isFile() && abs.endsWith('.md')) {
+    files.push(abs);
+  } else {
+    throw new Error('wr_skill_add: ' + abs + ' is not a .md file or directory');
+  }
+
+  let totalUpserted = 0;
+  const ids: string[] = [];
+  let firstSkillName = '';
+  for (const f of files) {
+    const raw = await fs.readFile(f, 'utf8');
+    const { meta, body } = parseFrontmatter(raw);
+    const skillName =
+      input.skill_name || meta.name || path.basename(path.dirname(f)) || path.basename(f, '.md');
+    firstSkillName = firstSkillName || skillName;
+    const scope: 'project' | 'global' = input.scope ?? (abs.includes(path.sep + '.claude' + path.sep) ? 'project' : 'global');
+    const fileKind: 'skill' | 'agent' | 'reference' =
+      input.file_kind ??
+      (f.endsWith('SKILL.md')
+        ? 'skill'
+        : f.includes(path.sep + 'agents' + path.sep)
+          ? 'agent'
+          : 'reference');
+    const description = input.description ?? meta.description ?? '';
+    const trigger = input.trigger ?? meta.triggers ?? '';
+    const chunks = chunkMarkdown(body);
+    for (const c of chunks) {
+      const vec = await embed(c.content);
+      const id = skillsHashId(skillName, c.heading, f);
+      await qdrant.upsert(SKILLS_COLLECTION, {
+        points: [
+          {
+            id,
+            vector: vec,
+            payload: {
+              skill_name: skillName,
+              scope,
+              file_kind: fileKind,
+              path: f,
+              description,
+              trigger,
+              heading: c.heading,
+              content: c.content,
+            },
+          },
+        ],
+        wait: true,
+      });
+      ids.push(id);
+      totalUpserted += 1;
+    }
+  }
+  return { points_upserted: totalUpserted, ids, skill_name: firstSkillName, path: abs };
 }
