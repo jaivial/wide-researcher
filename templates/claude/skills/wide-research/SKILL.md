@@ -37,6 +37,8 @@ list under the `wide-researcher` server:
 | `wr_file(path)` | Every chunk of one file, ordered. Use after search/impact tools to see full content. |
 | `wr_impact(description, k?)` | Legacy semantic file-grouped impact analysis. Use only when graph impact is unavailable. |
 | `wr_index_status` | Sanity check collections are healthy and up-to-date. |
+| `wr_skill_find(query, k?, skill?, scope?, file_kind?)` | Hybrid search over the `<collection>_skills` Qdrant collection (SKILL.md / agents / references). Use to find the right skill before authoring new ones or to recall what a project/global skill does. |
+| `wr_skill_add({path? \| content?, skill_name?, description?, trigger?, file_kind?, scope?})` | Add a markdown document to the skills collection. Pass `path` for a file/dir under `<project>/.claude/` or `~/.claude/`, or `content` for inline markdown. Idempotent on re-add. |
 
 ## Filter cheat-sheet
 

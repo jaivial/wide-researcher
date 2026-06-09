@@ -25,6 +25,7 @@ from qdrant_client.http.models import (
 from .config import (
     QDRANT_URL,
     QDRANT_COLLECTION,
+    SKILLS_COLLECTION,
     FILE_INDEX_PATH,
 )
 from .symbol_extractor import extract_file_graph
@@ -205,3 +206,67 @@ def delete_stale(_conn, current_files: set[str]) -> int:
     _save_file_index(fidx)
     log.info("removed %d stale files", len(gone))
     return len(gone)
+
+
+# ── Skills collection helpers ───────────────────────────────────────────────
+
+
+def _skills_point_id(skill_name: str, heading: str, path: str) -> str:
+    """Deterministic UUID for one skill-chunk point."""
+    return str(
+        uuid.uuid5(
+            uuid.NAMESPACE_URL,
+            f"wr-skills::{QDRANT_COLLECTION}::{skill_name}::{heading}::{path}",
+        )
+    )
+
+
+def upsert_skill(
+    *,
+    skill_name: str,
+    scope: str,
+    repo: str,
+    path: str,
+    file_kind: str,
+    description: str,
+    trigger: str,
+    content: str,
+    heading: str,
+    vector: list[float],
+) -> str:
+    """Upsert a single skill chunk into the skills collection.
+
+    Returns the point id used.
+    """
+    client = get_client()
+    point_id = _skills_point_id(skill_name, heading, path)
+    payload = {
+        "skill_name": skill_name,
+        "scope": scope,
+        "repo": repo,
+        "path": path,
+        "file_kind": file_kind,
+        "description": description,
+        "trigger": trigger,
+        "heading": heading,
+        "content": content,
+    }
+    client.upsert(
+        collection_name=SKILLS_COLLECTION,
+        points=[PointStruct(id=point_id, vector=list(vector), payload=payload)],
+        wait=True,
+    )
+    return point_id
+
+
+def delete_skill_points(path: str) -> int:
+    """Remove every skill chunk for a given source path (e.g. before reindex)."""
+    client = get_client()
+    client.delete(
+        collection_name=SKILLS_COLLECTION,
+        points_selector=Filter(
+            must=[FieldCondition(key="path", match=MatchValue(value=path))]
+        ),
+    )
+    return 1
+

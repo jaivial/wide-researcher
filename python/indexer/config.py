@@ -73,6 +73,7 @@ def _require(key: str):
 PROJECT_NAME: str = str(_cfg.get("project_name", "project"))
 PROJECT_ROOT: str = str(_require("project_root"))
 QDRANT_COLLECTION: str = str(_require("collection_name"))
+SKILLS_COLLECTION: str = f"{QDRANT_COLLECTION}_skills"
 
 # ── optional ──────────────────────────────────────────────────────────────────
 QDRANT_URL: str = str(_cfg.get("qdrant_url", "http://127.0.0.1:6333"))

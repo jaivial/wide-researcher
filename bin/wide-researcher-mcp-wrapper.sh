@@ -6,5 +6,6 @@ export WR_LLM_API_KEY="sk-cp-nqs60Hj946hUP-Z2eIpG3Kvhfh6_Mgz2xPnGFzKr6dO2whR45el
 export WR_LLM_MODEL="MiniMax-M2.7-highspeed"
 export WR_LLM_API_KEY_HEADER="x-api-key"
 export WR_LLM_TIMEOUT="30"
+export WIDE_RESEARCHER_DISABLE_INTERPRETER="${WIDE_RESEARCHER_DISABLE_INTERPRETER:-1}"
 
 exec node /var/www/wide-researcher/bin/wide-researcher-mcp.js "$@"

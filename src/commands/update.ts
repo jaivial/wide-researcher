@@ -146,22 +146,22 @@ export async function runUpdate(opts: UpdateOptions = {}): Promise<void> {
   log.info(`keeping existing embed model: ${model.label} (provider=${model.provider}, dim=${model.embedDim})`);
 
   if (!opts.noPipUpgrade) {
-    log.step('1/4 · python deps');
+    log.step('1/5 · python deps');
     await pipUpgrade();
   } else {
-    log.skip('1/4 · python deps (skipped via --no-pip-upgrade)');
+    log.skip('1/5 · python deps (skipped via --no-pip-upgrade)');
   }
 
-  log.step('2/4 · refresh claude bundle (.claude/ + .mcp.json + hook)');
+  log.step('2/5 · refresh claude bundle (.claude/ + .mcp.json + hook)');
   // force=true so SKILL.md / agent.md / hook script are rewritten from the
   // new templates. keepProjectConfig=true preserves user-customised fields
   // in <project>/.wide-researcher/config.json (excludes, batch_size, etc).
   await installClaudeBundle({ cwd, force: true, model, keepProjectConfig: true });
 
   if (opts.noSupervisor) {
-    log.skip('3/4 · supervisor unit (skipped via --no-supervisor)');
+    log.skip('3/5 · supervisor unit (skipped via --no-supervisor)');
   } else {
-    log.step('3/4 · refresh indexer supervisor unit');
+    log.step('3/5 · refresh indexer supervisor unit');
     await installIndexerSupervisor({
       slug: id.slug,
       projectName: id.projectName,
@@ -171,11 +171,25 @@ export async function runUpdate(opts: UpdateOptions = {}): Promise<void> {
   }
 
   if (opts.noRestart || opts.noSupervisor) {
-    log.skip('4/4 · restart watcher service (skipped)');
+    log.skip('4/5 · restart watcher service (skipped)');
   } else {
-    log.step('4/4 · restart watcher service');
+    log.step('4/5 · restart watcher service');
     await restartIndexerService(id.slug);
   }
+
+  // Step 5: refresh the skills collection. Idempotent; cheap when no
+  // files have changed.
+  log.step('5/5 · refresh skills collection (SKILL.md / agents / references)');
+  await run(venvPython(), ['-m', 'scripts.init_skills_collection'], {
+    cwd: pyPackageRoot(),
+    env: { ...process.env, WIDE_RESEARCHER_PROJECT_CONFIG: id.configPath },
+    echo: true,
+  });
+  await run(venvPython(), ['-m', 'scripts.skills_index', '--prune'], {
+    cwd: pyPackageRoot(),
+    env: { ...process.env, WIDE_RESEARCHER_PROJECT_CONFIG: id.configPath },
+    echo: true,
+  });
 
   log.ok(`wide-researcher updated in ${id.projectName}.`);
   log.info('Index data, secrets, and embed-provider choice were preserved.');

@@ -1,19 +1,20 @@
 // MCP tool implementations (Qdrant backend).
 //
-// Three public tools:
+// Four public tools:
 //   wr_find          — unified semantic / keyword / hybrid search
 //   wr_file          — every chunk of a file
 //   wr_impact        — file-grouped impact analysis
 //   wr_index_status  — health + counts
+//   wr_memories_find — search/list the shared memories store
+//   wr_memories_add  — add a new memory note
 //
 // No legacy aliases — wide-researcher is a fresh project, no
 // migration history to support.
 import { createHash } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
-import { qdrant, COLLECTION, SKILLS_COLLECTION, PROJECT_CONFIG } from './db.js';
+import { qdrant, COLLECTION, MEMORIES_COLLECTION, SKILLS_COLLECTION, PROJECT_CONFIG, resolveCollection } from './db.js';
 import { neo4jCallers, neo4jCallees, neo4jConfigError, neo4jEnabled, neo4jExports, neo4jImporters, } from './neo4j.js';
-const SYMBOL_COLLECTION = `${COLLECTION}_symbols`;
 // Per-file cap applied after rerank for diversification. Prevents one
 // chunk-dense file (e.g. a generated SDK) from monopolising the top-k.
 const PER_FILE_CAP_DEFAULT = 3;
@@ -36,6 +37,10 @@ function asStringArray(value) {
 function payloadText(p, key) {
     const value = p[key];
     return typeof value === 'string' && value.length > 0 ? value : undefined;
+}
+function isQdrantNotFound(err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return /not found/i.test(message);
 }
 function keywordPrefetches(query, limit, filter) {
     const must = filter?.must ?? [];
@@ -184,7 +189,7 @@ function impactWeight(language, filePath) {
  * 200–600 line windows than with 50-line raw chunks, so this is done
  * unconditionally before rerank.
  */
-async function expandWindows(rows) {
+async function expandWindows(rows, collection = COLLECTION) {
     if (rows.length === 0)
         return rows;
     const byFile = new Map();
@@ -197,7 +202,7 @@ async function expandWindows(rows) {
     }
     const idCache = new Map();
     await Promise.all([...byFile.entries()].map(async ([file_path, hits]) => {
-        const chunks = (await qdrant.scroll(COLLECTION, {
+        const chunks = (await qdrant.scroll(collection, {
             filter: { must: [{ key: 'file_path', match: { value: file_path } }] },
             limit: 500,
             with_payload: true,
@@ -348,7 +353,7 @@ function annotateSearchRows(rows, query) {
 async function searchSemantic(opts) {
     const vec = await opts.embed(opts.queryText);
     const fetchK = opts.rerank ? Math.max(opts.top_k * FUSION_MULTIPLIER, 40) : opts.top_k;
-    const res = (await qdrant.query(COLLECTION, {
+    const res = (await qdrant.query(opts.collection ?? COLLECTION, {
         query: vec,
         limit: fetchK,
         filter: opts.filter,
@@ -360,7 +365,7 @@ async function searchSemantic(opts) {
 }
 async function searchKeyword(opts) {
     const fetchK = opts.rerank ? Math.max(opts.top_k * FUSION_MULTIPLIER, 40) : opts.top_k;
-    const res = (await qdrant.query(COLLECTION, {
+    const res = (await qdrant.query(opts.collection ?? COLLECTION, {
         prefetch: keywordPrefetches(opts.queryText, fetchK, opts.filter),
         query: { fusion: 'rrf' },
         limit: fetchK,
@@ -376,7 +381,7 @@ async function searchKeyword(opts) {
 async function searchHybrid(opts) {
     const vec = await opts.embed(opts.queryText);
     const fetchK = opts.rerank ? Math.max(opts.top_k * FUSION_MULTIPLIER, 40) : opts.top_k;
-    const res = (await qdrant.query(COLLECTION, {
+    const res = (await qdrant.query(opts.collection ?? COLLECTION, {
         prefetch: [
             { query: vec, using: '', limit: fetchK, filter: opts.filter },
             ...keywordPrefetches(opts.queryText, fetchK, opts.filter),
@@ -400,7 +405,7 @@ async function searchHybrid(opts) {
 async function finalizeSearch(opts, rows) {
     let working = rows;
     if (opts.rerank) {
-        working = await expandWindows(working);
+        working = await expandWindows(working, opts.collection ?? COLLECTION);
         working = await rerankRows(opts.rerank, opts.queryText, working, opts.top_k * 2);
     }
     working = annotateSearchRows(working, opts.queryText);
@@ -447,6 +452,7 @@ export async function wrFind(opts) {
         filter,
         diversify: opts.diversify,
         perFileCap: opts.perFileCap,
+        collection: opts.collection ?? COLLECTION,
     };
     const runMode = async (currentOpts) => {
         if (mode === 'semantic')
@@ -473,7 +479,7 @@ export async function wrFile(opts) {
     const limit = Math.min(Math.max(1, opts.limit ?? 20), 100);
     const contentMode = opts.contentMode ?? 'preview';
     const maxChars = Math.max(200, opts.maxChars ?? 2000);
-    const res = (await qdrant.scroll(COLLECTION, {
+    const res = (await qdrant.scroll(opts.collection ?? COLLECTION, {
         filter: { must: [{ key: 'file_path', match: { value: opts.path } }] },
         limit: 1000,
         with_payload: true,
@@ -542,15 +548,23 @@ export async function wrSymbolFind(opts) {
     const semanticFilter = must.length ? { must } : undefined;
     const keywordFilter = { must: [{ key: 'graph_text', match: { text: opts.query } }, ...must] };
     const fetchK = opts.rerank ? Math.max(k * FUSION_MULTIPLIER, 40) : k;
-    const res = (await qdrant.query(SYMBOL_COLLECTION, {
-        prefetch: [
-            { query: vec, limit: fetchK, filter: semanticFilter },
-            { filter: keywordFilter, limit: fetchK },
-        ],
-        query: { fusion: 'rrf' },
-        limit: fetchK,
-        with_payload: true,
-    }));
+    let res;
+    try {
+        res = (await qdrant.query(resolveCollection(opts.collection).symbols, {
+            prefetch: [
+                { query: vec, limit: fetchK, filter: semanticFilter },
+                { filter: keywordFilter, limit: fetchK },
+            ],
+            query: { fusion: 'rrf' },
+            limit: fetchK,
+            with_payload: true,
+        }));
+    }
+    catch (e) {
+        if (isQdrantNotFound(e))
+            return [];
+        throw e;
+    }
     const rows = (res.points ?? []).map(payloadToSymbolResult);
     if (!opts.rerank || rows.length === 0)
         return rows.slice(0, k);
@@ -578,7 +592,7 @@ export async function wrCallers(opts) {
         return await neo4jCallers(PROJECT_CONFIG, opts.symbol, opts.k ?? 20);
     }
     const name = symbolName(opts.symbol);
-    const points = await scrollCollection(COLLECTION, anyValueFilter(['calls', 'references'], name), opts.k ?? 20);
+    const points = await scrollCollection(resolveCollection(opts.collection).base, anyValueFilter(['calls', 'references'], name), opts.k ?? 20);
     return points.map((pt) => ({ ...payloadToResult(pt), score: 1.0 }));
 }
 export async function wrCallees(opts) {
@@ -599,7 +613,7 @@ export async function wrCallees(opts) {
                 { key: 'symbol_fqn', match: { value: target } },
             ],
         };
-    const chunks = (await scrollCollection(COLLECTION, filter, opts.k ?? 20)).map((pt) => ({
+    const chunks = (await scrollCollection(resolveCollection(opts.collection).base, filter, opts.k ?? 20)).map((pt) => ({
         ...payloadToResult(pt),
         score: 1.0,
     }));
@@ -616,7 +630,7 @@ export async function wrCallArgs(opts) {
         must.push({ key: 'call_arg_literals', match: { value: opts.literal } });
     if (opts.callee)
         must.push({ key: 'calls', match: { value: symbolName(opts.callee) } });
-    const points = await scrollCollection(COLLECTION, must.length ? { must } : { must: [{ key: 'callsite_text', match: { text: opts.callee ?? opts.literal ?? '' } }] }, Math.min(opts.k ?? 50, 200));
+    const points = await scrollCollection(resolveCollection(opts.collection).base, must.length ? { must } : { must: [{ key: 'callsite_text', match: { text: opts.callee ?? opts.literal ?? '' } }] }, Math.min(opts.k ?? 50, 200));
     const out = [];
     for (const pt of points) {
         const p = (pt.payload ?? {});
@@ -663,7 +677,7 @@ export async function wrImporters(opts) {
             throw new Error(err);
         return await neo4jImporters(PROJECT_CONFIG, opts.pathOrModule, opts.k ?? 20);
     }
-    const points = await scrollCollection(COLLECTION, anyValueFilter(['imports', 'imported_files'], opts.pathOrModule), opts.k ?? 20);
+    const points = await scrollCollection(resolveCollection(opts.collection).base, anyValueFilter(['imports', 'imported_files'], opts.pathOrModule), opts.k ?? 20);
     return points.map((pt) => ({ ...payloadToResult(pt), score: 1.0 }));
 }
 export async function wrExports(opts) {
@@ -673,7 +687,7 @@ export async function wrExports(opts) {
             throw new Error(err);
         return await neo4jExports(PROJECT_CONFIG, opts.path, opts.k ?? 100);
     }
-    const chunks = (await scrollCollection(COLLECTION, valueFilter('file_path', opts.path), opts.k ?? 100)).map((pt) => ({
+    const chunks = (await scrollCollection(resolveCollection(opts.collection).base, valueFilter('file_path', opts.path), opts.k ?? 100)).map((pt) => ({
         ...payloadToResult(pt),
         score: 1.0,
     }));
@@ -708,6 +722,7 @@ function addArchImpact(byFile, filePath, language, score, reason, source, symbol
 }
 export async function wrArchImpact(opts) {
     const k = opts.k ?? 15;
+    const baseCollection = resolveCollection(opts.collection).base;
     const semanticHits = await searchHybrid({
         embed: opts.embed,
         rerank: opts.rerank,
@@ -715,10 +730,11 @@ export async function wrArchImpact(opts) {
         top_k: 80,
         filter: undefined,
         diversify: false,
+        collection: baseCollection,
     });
     let symbolHits = [];
     try {
-        symbolHits = await wrSymbolFind({ embed: opts.embed, query: opts.description, k: 40 });
+        symbolHits = await wrSymbolFind({ embed: opts.embed, query: opts.description, k: 40, collection: opts.collection });
     }
     catch {
         symbolHits = [];
@@ -762,9 +778,9 @@ export async function wrArchImpact(opts) {
     }
     for (const symbol of [...seedSymbols].slice(0, 20)) {
         const [callers, typeUsers, exporters] = await Promise.all([
-            scrollCollection(COLLECTION, anyValueFilter(['calls', 'references'], symbol), 20),
-            scrollCollection(COLLECTION, anyValueFilter(['type_refs', 'base_types', 'implements'], symbol), 20),
-            scrollCollection(COLLECTION, valueFilter('exports', symbol), 20),
+            scrollCollection(baseCollection, anyValueFilter(['calls', 'references'], symbol), 20),
+            scrollCollection(baseCollection, anyValueFilter(['type_refs', 'base_types', 'implements'], symbol), 20),
+            scrollCollection(baseCollection, valueFilter('exports', symbol), 20),
         ]);
         for (const point of callers) {
             const hit = payloadToResult(point);
@@ -780,7 +796,7 @@ export async function wrArchImpact(opts) {
         }
     }
     for (const filePath of [...seedFiles].slice(0, 20)) {
-        const importers = await scrollCollection(COLLECTION, anyValueFilter(['imports', 'imported_files'], filePath), 20);
+        const importers = await scrollCollection(baseCollection, anyValueFilter(['imports', 'imported_files'], filePath), 20);
         for (const point of importers) {
             const hit = payloadToResult(point);
             addArchImpact(byFile, hit.file_path, hit.language, 0.5, `imports ${filePath}`, 'importer', [hit.symbol_name ?? '', ...hit.declared_symbols], [{ kind: 'imports', target: filePath, line: hit.start_line }]);
@@ -797,6 +813,7 @@ export async function wrImpact(opts) {
         top_k: 80,
         filter: undefined,
         diversify: false,
+        collection: resolveCollection(opts.collection).base,
     });
     const byFile = new Map();
     for (const h of hits) {
@@ -825,17 +842,169 @@ export async function wrImpact(opts) {
         .sort((a, b) => b.total_score - a.total_score)
         .slice(0, k);
 }
-export async function wrIndexStatus() {
-    const info = (await qdrant.getCollection(COLLECTION));
-    return {
-        collection: COLLECTION,
-        status: info.status,
-        points_count: info.points_count,
-        vectors_count: info.vectors_count,
-        indexed_vectors_count: info.indexed_vectors_count,
-        vector_size: info.config?.params?.vectors?.size,
-        distance: info.config?.params?.vectors?.distance,
-    };
+export async function wrIndexStatus(collection) {
+    const target = resolveCollection(collection).base;
+    try {
+        const info = (await qdrant.getCollection(target));
+        return {
+            collection: target,
+            status: info.status,
+            points_count: info.points_count,
+            vectors_count: info.vectors_count,
+            indexed_vectors_count: info.indexed_vectors_count,
+            vector_size: info.config?.params?.vectors?.size,
+            distance: info.config?.params?.vectors?.distance,
+        };
+    }
+    catch (e) {
+        if (isQdrantNotFound(e)) {
+            return {
+                collection: target,
+                status: 'missing',
+                points_count: 0,
+            };
+        }
+        throw e;
+    }
+}
+/**
+ * List every Qdrant collection on the server, with health/size detail.
+ * Use to discover which `collection` value to pass to other tools.
+ * `filter` is an optional case-insensitive substring on the name.
+ */
+export async function wrCollections(opts) {
+    const list = (await qdrant.getCollections());
+    const needle = (opts?.filter ?? '').trim().toLowerCase();
+    const names = (list.collections ?? [])
+        .map((c) => c.name)
+        .filter((name) => (needle ? name.toLowerCase().includes(needle) : true))
+        .sort((a, b) => a.localeCompare(b));
+    const collections = await Promise.all(names.map(async (name) => {
+        try {
+            const info = (await qdrant.getCollection(name));
+            return {
+                name,
+                is_default: name === COLLECTION,
+                status: info.status,
+                points_count: info.points_count,
+                vector_size: info.config?.params?.vectors?.size,
+                distance: info.config?.params?.vectors?.distance,
+            };
+        }
+        catch {
+            return { name, is_default: name === COLLECTION, status: 'unknown', points_count: 0 };
+        }
+    }));
+    return { default_collection: COLLECTION, count: collections.length, collections };
+}
+function payloadStringArray(p, key) {
+    return asStringArray(p[key]);
+}
+function payloadBool(p, key) {
+    const value = p[key];
+    return typeof value === 'boolean' ? value : undefined;
+}
+export async function wrMemoriesFind(opts) {
+    const k = Math.max(1, opts.k ?? 10);
+    const query = (opts.query ?? '').trim();
+    if (!query) {
+        const res = (await qdrant.scroll(MEMORIES_COLLECTION, {
+            limit: k,
+            with_payload: true,
+            with_vector: false,
+        }));
+        return (res.points ?? []).slice(0, k).map((pt) => {
+            const p = (pt.payload ?? {});
+            const title = typeof p.title === 'string' ? p.title : '';
+            const summary = typeof p.summary === 'string' ? p.summary : '';
+            return {
+                id: pt.id,
+                title,
+                summary,
+                kind: typeof p.kind === 'string' ? p.kind : undefined,
+                tags: payloadStringArray(p, 'tags'),
+                files: payloadStringArray(p, 'files'),
+                learned_at: typeof p.learned_at === 'string' ? p.learned_at : undefined,
+                resolved: payloadBool(p, 'resolved'),
+                preview: `${title}\n${summary}`.trim().slice(0, 500),
+                score: pt.score ?? null,
+            };
+        });
+    }
+    const vec = await opts.embed(query);
+    const fetchK = Math.max(k * 4, 20);
+    const res = (await qdrant.query(MEMORIES_COLLECTION, {
+        prefetch: [
+            { query: vec, limit: fetchK },
+            {
+                filter: {
+                    should: [
+                        { key: 'title', match: { text: query } },
+                        { key: 'summary', match: { text: query } },
+                        { key: 'kind', match: { text: query } },
+                    ],
+                },
+                limit: fetchK,
+            },
+        ],
+        query: { fusion: 'rrf' },
+        limit: fetchK,
+        with_payload: true,
+    }));
+    return (res.points ?? []).slice(0, k).map((pt) => {
+        const p = (pt.payload ?? {});
+        const title = typeof p.title === 'string' ? p.title : '';
+        const summary = typeof p.summary === 'string' ? p.summary : '';
+        return {
+            id: pt.id,
+            title,
+            summary,
+            kind: typeof p.kind === 'string' ? p.kind : undefined,
+            tags: payloadStringArray(p, 'tags'),
+            files: payloadStringArray(p, 'files'),
+            learned_at: typeof p.learned_at === 'string' ? p.learned_at : undefined,
+            resolved: payloadBool(p, 'resolved'),
+            preview: `${title}\n${summary}`.trim().slice(0, 500),
+            score: pt.score ?? null,
+        };
+    });
+}
+function memoriesHashId(content) {
+    const buf = createHash('sha1')
+        .update('wr-memories::' + content)
+        .digest();
+    const hex = buf.subarray(0, 16).toString('hex');
+    return hex.slice(0, 8) + '-' + hex.slice(8, 12) + '-5' + hex.slice(13, 16) + '-' + hex.slice(16, 20) + '-' + hex.slice(20, 32);
+}
+export async function wrMemoryAdd(embed, input) {
+    const title = input.title.trim();
+    if (!title)
+        throw new Error('wr_memories_add: `title` is required.');
+    if (!input.content?.trim())
+        throw new Error('wr_memories_add: `content` is required.');
+    const textForEmbed = title + '\n' + (input.summary ?? '') + '\n' + input.content;
+    const vec = await embed(textForEmbed);
+    const id = memoriesHashId(title + input.content);
+    await qdrant.upsert(MEMORIES_COLLECTION, {
+        points: [
+            {
+                id,
+                vector: vec,
+                payload: {
+                    title,
+                    content: input.content,
+                    summary: input.summary ?? '',
+                    kind: input.kind ?? '',
+                    tags: input.tags ?? [],
+                    files: input.files ?? [],
+                    learned_at: input.learned_at ?? new Date().toISOString(),
+                    resolved: input.resolved ?? false,
+                },
+            },
+        ],
+        wait: true,
+    });
+    return { points_upserted: 1, id, title };
 }
 const SKILL_FUSION_MULTIPLIER = 4;
 function skillsHashId(skillName, heading, filePath) {
@@ -860,15 +1029,23 @@ export async function wrSkillFind(opts) {
     const semanticFilter = must.length ? { must } : undefined;
     const keywordFilter = { must: [{ key: 'content', match: { text: opts.query } }, ...must] };
     const fetchK = Math.max(k * SKILL_FUSION_MULTIPLIER, 20);
-    const res = (await qdrant.query(SKILLS_COLLECTION, {
-        prefetch: [
-            { query: vec, limit: fetchK, filter: semanticFilter },
-            { filter: keywordFilter, limit: fetchK },
-        ],
-        query: { fusion: 'rrf' },
-        limit: fetchK,
-        with_payload: true,
-    }));
+    let res;
+    try {
+        res = (await qdrant.query(resolveCollection(opts.collection).skills, {
+            prefetch: [
+                { query: vec, limit: fetchK, filter: semanticFilter },
+                { filter: keywordFilter, limit: fetchK },
+            ],
+            query: { fusion: 'rrf' },
+            limit: fetchK,
+            with_payload: true,
+        }));
+    }
+    catch (e) {
+        if (isQdrantNotFound(e))
+            return [];
+        throw e;
+    }
     const points = res.points ?? [];
     return points.slice(0, k).map((pt) => {
         const p = (pt.payload ?? {});

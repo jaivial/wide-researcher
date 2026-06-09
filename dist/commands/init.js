@@ -94,10 +94,10 @@ export async function runInit(opts = {}) {
         }
     }
     if (opts.noWatch || opts.noSupervisor) {
-        log.skip('6/6 · indexer watcher (skipped via --no-watch / --no-supervisor)');
+        log.skip('6/7 · indexer watcher (skipped via --no-watch / --no-supervisor)');
     }
     else {
-        log.step('6/6 · register indexer watcher daemon');
+        log.step('6/7 · register indexer watcher daemon');
         await installIndexerSupervisor({
             slug: id.slug,
             projectName: id.projectName,
@@ -105,7 +105,26 @@ export async function runInit(opts = {}) {
             force: opts.force,
         });
     }
+    // Step 7: bootstrap + initial index of the skills collection
+    // (SKILL.md, references/*.md, agents/*.md). Always run; the
+    // script is idempotent and re-runs are cheap.
+    if (opts.noReindex) {
+        log.skip('7/7 · skills collection (skipped via --no-reindex)');
+    }
+    else {
+        log.step('7/7 · bootstrap + index skills collection');
+        await run(venvPython(), ['-m', 'scripts.init_skills_collection'], {
+            cwd: pyPackageRoot(),
+            env: { ...process.env, WIDE_RESEARCHER_PROJECT_CONFIG: id.configPath },
+            echo: true,
+        });
+        await run(venvPython(), ['-m', 'scripts.skills_index', '--prune'], {
+            cwd: pyPackageRoot(),
+            env: { ...process.env, WIDE_RESEARCHER_PROJECT_CONFIG: id.configPath },
+            echo: true,
+        });
+    }
     log.ok(`wide-researcher ready in ${id.projectName} (embed: ${model.label})`);
-    log.info('open Claude Code in this directory — wr_find / wr_impact / wr_file are auto-discovered.');
+    log.info('open Claude Code in this directory — wr_find / wr_impact / wr_file / wr_skill_find are auto-discovered.');
 }
 //# sourceMappingURL=init.js.map

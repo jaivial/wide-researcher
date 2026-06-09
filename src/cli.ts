@@ -14,6 +14,7 @@ import { runReindex } from './commands/reindex.js';
 import { runStatus } from './commands/status.js';
 import { runSearch } from './commands/search.js';
 import { runSymbolIndex } from './commands/symbol-index.js';
+import { runSkillsIndex, runSkillsInitCollection } from './commands/skills-index.js';
 import { runUninstall } from './commands/uninstall.js';
 import { runUpdate } from './commands/update.js';
 import { log } from './utils/log.js';
@@ -162,6 +163,37 @@ program
   .action(async (opts: { json?: boolean }) => {
     try {
       await runStatus({ json: opts.json });
+    } catch (e) {
+      fail(e);
+    }
+  });
+
+program
+  .command('skills-index')
+  .description('Index SKILL.md, references/*.md, and agents/*.md into the <collection>_skills Qdrant collection.')
+  .option('--force', 'Re-index even when the content hash matches')
+  .option('--dry-run', 'Discover and parse, but skip embedding/upsert')
+  .option('--prune', 'Delete points for files that no longer exist on disk')
+  .option('--init-collection', 'Run init_skills_collection first (idempotent collection bootstrap)')
+  .action(async (opts: { force?: boolean; dryRun?: boolean; prune?: boolean; initCollection?: boolean }) => {
+    try {
+      await runSkillsIndex({
+        force: opts.force,
+        dryRun: opts.dryRun,
+        prune: opts.prune,
+        initCollection: opts.initCollection,
+      });
+    } catch (e) {
+      fail(e);
+    }
+  });
+
+program
+  .command('skills-init-collection')
+  .description('Create or verify the <collection>_skills Qdrant collection (idempotent).')
+  .action(async () => {
+    try {
+      await runSkillsInitCollection();
     } catch (e) {
       fail(e);
     }

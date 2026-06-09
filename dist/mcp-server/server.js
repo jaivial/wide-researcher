@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 // wide-researcher MCP server (stdio transport, Qdrant backend).
 //
-// Three tools — wr_find / wr_file / wr_impact — plus an index-status
-// helper. Per-project config comes from argv:
+// Six public tools — wr_find / wr_file / wr_impact / wr_memories_find / wr_memories_add / wr_skill_find — plus
+// an index-status helper. Per-project config comes from argv:
 //
 //   node dist/mcp-server/server.js --project-config /abs/.wide-researcher/config.json
 //
@@ -16,7 +16,7 @@ import { CallToolRequestSchema, ListToolsRequestSchema, } from '@modelcontextpro
 import { loadProjectConfig } from './config.js';
 import { EmbedWorker } from './embed.js';
 import { InterpreterWorker } from './interpreter.js';
-import { wrArchImpact, wrCallArgs, wrCallers, wrCallees, wrExports, compactSearchResult, wrFind, wrFile, wrImpact, wrImporters, wrIndexStatus, wrSkillAdd, wrSkillFind, wrSymbolFind, } from './tools.js';
+import { wrArchImpact, wrCallArgs, wrCallers, wrCallees, wrCollections, wrExports, compactSearchResult, wrFind, wrFile, wrImpact, wrImporters, wrIndexStatus, wrMemoriesFind, wrMemoryAdd, wrSkillAdd, wrSkillFind, wrSymbolFind, } from './tools.js';
 import { pyPackageRoot, venvPython } from '../utils/paths.js';
 import { getResult, putResult } from '../utils/cache.js';
 import path from 'node:path';
@@ -223,6 +223,51 @@ const TOOLS = [
         inputSchema: { type: 'object', properties: {} },
     },
     {
+        name: 'wr_collections',
+        description: 'List every Qdrant collection on the server with status, points_count, and vector dim. The current project default is flagged with is_default. Use this to discover which value to pass as the `collection` override on other tools (wr_find, wr_impact, wr_symbol_find, etc.).',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                filter: {
+                    type: 'string',
+                    description: 'Optional case-insensitive substring to match collection names.',
+                },
+            },
+        },
+    },
+    {
+        name: 'wr_memories_find',
+        description: 'Read-only search over the shared memories collection. Use it to list or search stored memory notes by title, summary, kind, tags, and related files.',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                query: {
+                    type: 'string',
+                    description: 'Optional search query. Leave empty to list recent memories.',
+                },
+                k: { type: 'number', description: 'Max memories to return. Default 10.' },
+            },
+        },
+    },
+    {
+        name: 'wr_memories_add',
+        description: 'Add a new memory note to the shared memories collection. Idempotent — re-adding the same title+content reuses the deterministic point id. Fields: title (required), content (required), summary, kind, tags, files, learned_at, resolved.',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                title: { type: 'string', description: 'Memory title (required).' },
+                content: { type: 'string', description: 'Memory content/body (required).' },
+                summary: { type: 'string', description: 'Optional short summary.' },
+                kind: { type: 'string', description: 'Optional kind label (e.g. user, feedback, project, reference).' },
+                tags: { type: 'array', items: { type: 'string' }, description: 'Optional string tags.' },
+                files: { type: 'array', items: { type: 'string' }, description: 'Optional related file paths.' },
+                learned_at: { type: 'string', description: 'Optional ISO date string. Defaults to now.' },
+                resolved: { type: 'boolean', description: 'Optional resolved flag. Default false.' },
+            },
+            required: ['title', 'content'],
+        },
+    },
+    {
         name: 'wr_skill_find',
         description: 'Hybrid semantic + full-text search over the project <collection>_skills collection. Use to locate the right SKILL.md / agents / references chunk for a question about "how do I do X" or "what skill handles Y". Returns skill_name, scope, file_kind, path, heading, preview.',
         inputSchema: {
@@ -255,6 +300,32 @@ const TOOLS = [
         },
     },
 ];
+/* Inject a shared optional `collection` override into every code/graph tool.
+ * Lets a single call target a non-default Qdrant collection (base name; the
+ * tool derives `_symbols` / `_skills` siblings as needed). Memories tools are
+ * intentionally excluded — they operate on the fixed shared `memories` store. */
+const COLLECTION_OVERRIDE_TOOLS = new Set([
+    'wr_find',
+    'wr_file',
+    'wr_impact',
+    'wr_arch_impact',
+    'wr_symbol_find',
+    'wr_call_args',
+    'wr_callers',
+    'wr_callees',
+    'wr_importers',
+    'wr_exports',
+    'wr_index_status',
+    'wr_skill_find',
+]);
+for (const tool of TOOLS) {
+    if (COLLECTION_OVERRIDE_TOOLS.has(tool.name)) {
+        tool.inputSchema.properties.collection = {
+            type: 'string',
+            description: 'Optional Qdrant collection override (base name). Defaults to the project collection. Call wr_collections to discover available names.',
+        };
+    }
+}
 const DEFAULT_MAX_RESPONSE_BYTES = Number.parseInt(process.env.WIDE_RESEARCHER_MAX_RESPONSE_BYTES ?? '64000', 10);
 function responseBudget(args) {
     const requested = typeof args?.max_bytes === 'number' ? args.max_bytes : DEFAULT_MAX_RESPONSE_BYTES;
@@ -355,6 +426,7 @@ const HANDLERS = {
         snippet_lines: a.snippet_lines ?? 20,
         max_bytes: responseBudget(a),
         rerank: !RERANK_DISABLED,
+        collection: a.collection ?? null,
     }, async () => {
         const results = await wrFind({
             embed,
@@ -366,6 +438,7 @@ const HANDLERS = {
             runtime: a.runtime ?? null,
             layer: a.layer ?? null,
             mode: a.mode ?? 'hybrid',
+            collection: a.collection ?? null,
         });
         const built = {
             tool: 'wr_find',
@@ -383,15 +456,17 @@ const HANDLERS = {
             limit: a.limit,
             contentMode: a.content_mode,
             maxChars: a.max_chars,
+            collection: a.collection ?? null,
         });
         return jsonContent({ tool: 'wr_file', path: a.path, count: result.returned, ...result }, responseBudget(a));
     },
-    wr_impact: async (a) => withResultCache({ tool: 'wr_impact', d: a.description ?? '', k: a.k ?? 15, rerank: !RERANK_DISABLED }, async () => {
+    wr_impact: async (a) => withResultCache({ tool: 'wr_impact', d: a.description ?? '', k: a.k ?? 15, rerank: !RERANK_DISABLED, collection: a.collection ?? null }, async () => {
         const files = await wrImpact({
             embed,
             rerank: rerankFn,
             description: a.description ?? '',
             k: a.k ?? 15,
+            collection: a.collection ?? null,
         });
         return jsonContent({
             tool: 'wr_impact',
@@ -407,6 +482,7 @@ const HANDLERS = {
         kind: a.kind ?? null,
         lang: a.lang ?? null,
         rerank: !RERANK_DISABLED,
+        collection: a.collection ?? null,
     }, async () => {
         const results = await wrSymbolFind({
             embed,
@@ -415,6 +491,7 @@ const HANDLERS = {
             k: a.k ?? 10,
             kind: a.kind ?? null,
             lang: a.lang ?? null,
+            collection: a.collection ?? null,
         });
         return jsonContent({ tool: 'wr_symbol_find', query: a.query, count: results.length, results });
     }),
@@ -426,30 +503,53 @@ const HANDLERS = {
             lang: a.lang ?? null,
             path: a.path ?? null,
             k: a.k ?? 50,
+            collection: a.collection ?? null,
         });
         return jsonContent({ tool: 'wr_call_args', count: results.length, results }, responseBudget(a));
     },
     wr_callers: async (a) => {
-        const results = await wrCallers({ symbol: a.symbol ?? '', k: a.k ?? 20 });
+        const results = await wrCallers({ symbol: a.symbol ?? '', k: a.k ?? 20, collection: a.collection ?? null });
         return jsonContent({ tool: 'wr_callers', symbol: a.symbol, count: results.length, results }, responseBudget(a));
     },
     wr_callees: async (a) => {
-        const result = await wrCallees({ symbolOrFile: a.symbolOrFile ?? '', k: a.k ?? 20 });
+        const result = await wrCallees({ symbolOrFile: a.symbolOrFile ?? '', k: a.k ?? 20, collection: a.collection ?? null });
         return jsonContent({ tool: 'wr_callees', symbolOrFile: a.symbolOrFile, ...result });
     },
     wr_importers: async (a) => {
-        const results = await wrImporters({ pathOrModule: a.pathOrModule ?? '', k: a.k ?? 20 });
+        const results = await wrImporters({ pathOrModule: a.pathOrModule ?? '', k: a.k ?? 20, collection: a.collection ?? null });
         return jsonContent({ tool: 'wr_importers', pathOrModule: a.pathOrModule, count: results.length, results });
     },
     wr_exports: async (a) => {
-        const result = await wrExports({ path: a.path ?? '', k: a.k ?? 100 });
+        const result = await wrExports({ path: a.path ?? '', k: a.k ?? 100, collection: a.collection ?? null });
         return jsonContent({ tool: 'wr_exports', path: a.path, ...result });
     },
-    wr_arch_impact: async (a) => withResultCache({ tool: 'wr_arch_impact', d: a.description ?? '', k: a.k ?? 15, rerank: !RERANK_DISABLED }, async () => {
-        const files = await wrArchImpact({ embed, rerank: rerankFn, description: a.description ?? '', k: a.k ?? 15 });
+    wr_arch_impact: async (a) => withResultCache({ tool: 'wr_arch_impact', d: a.description ?? '', k: a.k ?? 15, rerank: !RERANK_DISABLED, collection: a.collection ?? null }, async () => {
+        const files = await wrArchImpact({ embed, rerank: rerankFn, description: a.description ?? '', k: a.k ?? 15, collection: a.collection ?? null });
         return jsonContent({ tool: 'wr_arch_impact', description: a.description, count: files.length, files });
     }),
-    wr_index_status: async () => jsonContent({ tool: 'wr_index_status', ...(await wrIndexStatus()) }),
+    wr_index_status: async (a) => jsonContent({ tool: 'wr_index_status', ...(await wrIndexStatus(a.collection ?? null)) }),
+    wr_collections: async (a) => jsonContent({ tool: 'wr_collections', ...(await wrCollections({ filter: a.filter ?? null })) }, responseBudget(a)),
+    wr_memories_find: async (a) => jsonContent({
+        tool: 'wr_memories_find',
+        results: await wrMemoriesFind({
+            embed,
+            query: a.query,
+            k: a.k,
+        }),
+    }, responseBudget(a)),
+    wr_memories_add: async (a) => {
+        const result = await wrMemoryAdd(embed, {
+            title: a.title ?? '',
+            content: a.content ?? '',
+            summary: a.summary,
+            kind: a.kind,
+            tags: a.tags,
+            files: a.files,
+            learned_at: a.learned_at,
+            resolved: a.resolved,
+        });
+        return jsonContent({ tool: 'wr_memories_add', ...result }, responseBudget(a));
+    },
     wr_skill_find: async (a) => withResultCache({
         tool: 'wr_skill_find',
         q: a.query ?? '',
@@ -457,6 +557,7 @@ const HANDLERS = {
         skill: a.skill ?? null,
         scope: a.scope ?? null,
         file_kind: a.fileKind ?? null,
+        collection: a.collection ?? null,
     }, async () => {
         const results = await wrSkillFind({
             embed,
@@ -465,6 +566,7 @@ const HANDLERS = {
             skill: a.skill ?? null,
             scope: a.scope ?? null,
             fileKind: a.fileKind ?? null,
+            collection: a.collection ?? null,
         });
         return jsonContent({ tool: 'wr_skill_find', query: a.query, count: results.length, results }, responseBudget(a));
     }),
